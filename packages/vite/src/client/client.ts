@@ -1,6 +1,8 @@
 import type { InferCustomEventPayload } from "../../types/customEvent";
 import { HMRClient, HMRContext } from "../shared/hmr";
 import type { ViteHotContext } from "../../types/hot";
+import type { ErrorPayload, HMRPayload } from "../../types/hmrPayload";
+import { ErrorOverlay, overlayId } from "./overlay";
 
 import "@vite/env";
 
@@ -148,7 +150,145 @@ function setupWebSocket(
   return socket;
 }
 
-const hmrClient = new HMRClient();
+function cleanUrl(pathname: string): string {
+  const url = new URL(pathname, "http://vitejs.dev");
+  url.searchParams.delete("direct");
+  return url.pathname + url.search;
+}
+
+//用于跟踪是否是第一次更新。初始值为 true，表示第一次更新。
+let isFirstUpdate = true;
+//用于存储过时的 <link> 元素,用于在更新时检测和处理过时的样式表链接
+//WeakSet 弱引用，会被被垃圾回收机制自动清除
+const outdatedLinkTags = new WeakSet<HTMLLinkElement>();
+
+const debounceReload = (time: number) => {
+  let timer: ReturnType<typeof setTimeout> | null;
+  return () => {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    timer = setTimeout(() => {
+      location.reload();
+    }, time);
+  };
+};
+const pageReload = debounceReload(50);
+
+const hmrClient = new HMRClient(
+  console,
+  {
+    isReady: () => socket && socket.readyState === 1,
+    send: (message) => socket.send(message),
+  },
+  async function importUpdatedModule({
+    acceptedPath,
+    timestamp,
+    explicitImportRequired,
+    isWithinCircularImport,
+  }) {
+    const [acceptedPathWithoutQuery, query] = acceptedPath.split("?");
+    const importPromise = import(
+      base +
+        acceptedPathWithoutQuery.slice(1) +
+        `?${explicitImportRequired ? "import&" : ""}t=${timestamp}${
+          query ? `&${query}` : ""
+        }`
+    );
+
+    if (isWithinCircularImport) {
+      importPromise.catch(() => {
+        console.info(
+          `[hmr] ${acceptedPath} failed to apply HMR as it's within a circular import. Reloading page to reset the execution order. ` +
+            `To debug and break the circular import, you can run \`vite --debug hmr\` to log the circular dependency path if a file change triggered it.`
+        );
+        pageReload();
+      });
+    }
+    return await importPromise;
+  }
+);
+
+//根据不同的消息类型执行不同的操作
+async function handleMessage(payload: HMRPayload) {
+  switch (payload.type) {
+    case "connected":
+      console.debug(`[vite] connected.`);
+      //刷新消息传递器（Messenger），确保之前积累的消息都被发送出去。
+      hmrClient.messenger.flush();
+
+      //设置定时器，定期向服务器发送 ping 消息以保持 WebSocket 连接的活跃状态（心跳检测）。
+      setInterval(() => {
+        if (socket.readyState === socket.OPEN) {
+          socket.send('{"type":"ping"}');
+        }
+      }, __HMR_TIMEOUT__);
+      break;
+    case "update":
+      //在更新之前，触发 'vite' 事件通知。
+      notifyListeners("vite:beforeUpdate", payload);
+      if (hasDocument) {
+        /**
+         * 处理模块更新时有一种特殊情况：
+         *  如果这是第一次更新，并且已经存在错误覆盖层（error overlay），这意味着页面在加载时出现了服务器编译错误，
+         *  ，整个模块脚本加载失败（因为其中一个嵌套导入返回 500 状态码）。在这种情况下，仅仅进行普通的模块更新是不够的，
+         * 需要执行完整的页面重新加载，以确保页面能够正确加载并显示。
+         */
+        if (isFirstUpdate && hasErrorOverlay()) {
+          window.location.reload();
+          return;
+        } else {
+          if (enableOverlay) {
+            clearErrorOverlay();
+          }
+          isFirstUpdate = false;
+        }
+      }
+
+      /**
+       * 对于每个更新，根据更新类型执行不同的操作：
+       *    1. 如果是 JavaScript 更新，则将更新放入更新队列中等待处理
+       *    2. 如果是 CSS 更新，则在页面上加载新的样式表，同时移除旧的样式表，以避免页面上出现未样式内容
+       */
+
+      await Promise.all(
+        payload.updates.map(async (update): Promise<void> => {
+          if (update.type === "js-update") {
+            return hmrClient.queueUpdate(update);
+          }
+
+          //css 更新
+          const { path, timestamp } = update;
+          const searchUrl = cleanUrl(path);
+
+          /**
+           * 这里不能使用带有' [href*=] '的querySelector，因为链接可能使用相对路径，
+           * 所以我们需要使用link.href获取包含检查的完整URL。
+           */
+
+          //查找页面中引用了该 CSS 文件的 <link> 元素。
+          const el = Array.from(
+            document.querySelectorAll<HTMLLinkElement>("link")
+          ).find(
+            (e) =>
+              !outdatedLinkTags.has(e) && cleanUrl(e.href).includes(searchUrl)
+          );
+
+          if (!el) return;
+
+          const newPath = `${base}${searchUrl.slice(1)}${
+            searchUrl.includes("?") ? "&" : "?"
+          }t=${timestamp}
+                `;
+        })
+      );
+
+      break;
+    default:
+      break;
+  }
+}
 
 /**
  * 函数重载
@@ -178,6 +318,17 @@ function notifyListeners(event: string, data: any): void {
  * 
  */
 
-export function createHotContext(ownerPath: string): ViteHotContext {
+const enableOverlay = __HMR_ENABLE_OVERLAY__;
+const hasDocument = "document" in globalThis;
+
+function createHotContext(ownerPath: string): ViteHotContext {
   return new HMRContext(hmrClient, ownerPath);
+}
+
+function clearErrorOverlay() {
+  document.querySelectorAll<ErrorOverlay>(overlayId).forEach((n) => n.close());
+}
+
+function hasErrorOverlay() {
+  return document.querySelectorAll(overlayId).length;
 }

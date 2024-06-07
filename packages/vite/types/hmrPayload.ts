@@ -1,3 +1,10 @@
+export type HMRPayload =
+  | ConnectedPayload
+  | UpdatePayload
+  | FullReloadPayload
+  | CustomPayload
+  | ErrorPayload
+  | PrunePayload;
 export interface ConnectedPayload {
   type: "connected";
 }
@@ -27,6 +34,12 @@ export interface FullReloadPayload {
   path?: string;
   /** @internal */
   triggeredBy?: string;
+}
+
+export interface CustomPayload {
+  type: "custom";
+  event: string;
+  data?: any;
 }
 export interface ErrorPayload {
   type: "error";
