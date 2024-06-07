@@ -1,0 +1,22 @@
+{
+  "name": "vite",
+  "version": "1.0.0",
+  "description": "",
+  "bin": "bin/vite.js",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "pnpm run build-bundle -w",
+    "build-bundle": "rollup --config rollup.config.ts "
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@rollup/plugin-typescript": "^11.1.6",
+    "rollup": "^4.13.0"
+  },
+  "devDependencies": {
+    "@rollup/plugin-node-resolve": "^15.2.3"
+  }
+}
