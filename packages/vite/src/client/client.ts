@@ -218,7 +218,7 @@ async function handleMessage(payload: HMRPayload) {
       //刷新消息传递器（Messenger），确保之前积累的消息都被发送出去。
       hmrClient.messenger.flush();
 
-      //设置定时器，定期向服务器发送 ping 消息以保持 WebSocket 连接的活跃状态（心跳检测）。
+      //nginx docker 的热更新可能会超时，所有定期向服务器发送 ping 消息以保持 WebSocket 连接的活跃状态（心跳检测）。
       setInterval(() => {
         if (socket.readyState === socket.OPEN) {
           socket.send('{"type":"ping"}');
@@ -281,13 +281,94 @@ async function handleMessage(payload: HMRPayload) {
             searchUrl.includes("?") ? "&" : "?"
           }t=${timestamp}
                 `;
+
+          /**
+           * 通过创建一个新的 <link> 标签来更新 CSS 文件，而不是直接替换现有标签的 href 属性。
+           * 这么做的好处是可以避免在新样式表加载之前出现闪烁的无样式内容 (FOUC)
+           */
+          return new Promise((resolve) => {
+            //克隆现有的 <link> 标签。
+            const newLinkTag = el.cloneNode() as HTMLLinkElement;
+            //设置新的 href 属性，指向新的 CSS 文件路径。
+            newLinkTag.href = new URL(newPath, el.href).href;
+
+            //定义一个函数，当新的样式表加载成功或失败时，移除旧的 <link> 标签。
+            const removeOldEl = () => {
+              el.remove();
+              console.debug(`[vite] css hot updated: ${searchUrl}`);
+              resolve();
+            };
+            newLinkTag.addEventListener("load", removeOldEl);
+            newLinkTag.addEventListener("error", removeOldEl);
+            //将旧的 <link> 标签添加到 outdatedLinkTags 集合中，标记为过时。
+            outdatedLinkTags.add(el);
+            //在旧的 <link> 标签后插入新的 <link> 标签。
+            el.after(newLinkTag);
+          });
         })
       );
+      notifyListeners("vite:afterUpdate", payload);
+      break;
+    case "custom": {
+      notifyListeners(payload.event, payload.data);
+      break;
+    }
+    case "full-reload":
+      notifyListeners("vite:beforeFullReload", payload);
 
+      //通过处理 full-reload 事件，在 HMR 过程中确保浏览器在适当的时候重新加载页面，
+      //保证开发者在修改 HTML 文件或其他无法热替换的资源时，浏览器能够及时反映这些更改
+      if (hasDocument) {
+        //只有在浏览器环境下才会执行以下逻辑
+
+        //检查路径和文件类型
+        if (payload.path && payload.path.endsWith(".html")) {
+          //如果编辑了HTML文件，只有当浏览器当前在该页面上时才重新加载该页。
+
+          //使用 decodeURI(location.pathname) 获取当前页面的路径，并对路径进行解码，处理 URL 编码字符。
+          const pagePath = decodeURI(location.pathname);
+          //计算 payload 的完整路径
+          //base 是基路径，payload.path.slice(1) 去掉路径的第一个字符（通常是 /），然后与 base 拼接成完整路径。
+          const payloadPath = base + payload.path.slice(1);
+          if (
+            pagePath === payloadPath ||
+            payload.path === "/index.html" ||
+            (pagePath.endsWith("/") && pagePath + "index.html" === payloadPath)
+          ) {
+            pageReload();
+          }
+          return;
+        } else {
+          // 如果路径不存在或不是 '.html' 结尾，直接重新加载页面
+          pageReload();
+        }
+      }
       break;
-    default:
+    case "prune":
+      notifyListeners("vite:beforePrune", payload);
+      await hmrClient.prunePaths(payload.paths);
       break;
+    case "error": {
+      notifyListeners("vite:error", payload);
+      if (hasDocument) {
+        const err = payload.err;
+        if (enableOverlay) {
+          createErrorOverlay(err);
+        } else {
+          console.error(
+            `[vite] Internal Server Error\n${err.message}\n${err.stack}`
+          );
+        }
+      }
+      break;
+    }
+    default: {
+      const check: never = payload;
+      return check;
+    }
   }
+
+  //case 增加 {} 是为了块级作用域，避免 在case 中变量冲突
 }
 
 /**
@@ -318,17 +399,94 @@ function notifyListeners(event: string, data: any): void {
  * 
  */
 
-const enableOverlay = __HMR_ENABLE_OVERLAY__;
-const hasDocument = "document" in globalThis;
-
 function createHotContext(ownerPath: string): ViteHotContext {
   return new HMRContext(hmrClient, ownerPath);
 }
 
+const enableOverlay = __HMR_ENABLE_OVERLAY__;
+const hasDocument = "document" in globalThis;
+
+function createErrorOverlay(err: ErrorPayload["err"]) {
+  clearErrorOverlay();
+  // document.body.appendChild(new ErrorOverlay(err));
+}
 function clearErrorOverlay() {
   document.querySelectorAll<ErrorOverlay>(overlayId).forEach((n) => n.close());
 }
 
 function hasErrorOverlay() {
   return document.querySelectorAll(overlayId).length;
+}
+
+/**
+ * 不断尝试对指定的 WebSocket 地址进行 ping 操作，直到成功为止
+ * @param socketProtocol WebSocket 协议（如 wss 或 ws）
+ * @param hostAndPath 主机名和路径
+ * @param ms 每次 ping 之间的等待时间，默认为 1000 毫秒
+ * @returns
+ */
+async function waitForSuccessfulPing(
+  socketProtocol: string,
+  hostAndPath: string,
+  ms = 1000
+) {
+  const pingHostProtocol = socketProtocol === "wss" ? "https" : "http";
+
+  const ping = async () => {
+    // A fetch on a websocket URL will return a successful promise with status 400,
+    // but will reject a networking error.
+    // When running on middleware mode, it returns status 426, and an cors error happens if mode is not no-cors
+    try {
+      await fetch(`${pingHostProtocol}://${hostAndPath}`, {
+        mode: "no-cors", //表示跨域请求
+        headers: {
+          //使用 Accept 头来识别 ping 请求
+          // Custom headers won't be included in a request with no-cors so (ab)use one of the
+          // safelisted headers to identify the ping request
+          Accept: "text/x-vite-ping",
+        },
+      });
+      //如果请求成功（即使状态码是 400），返回 true，否则返回 false
+      return true;
+    } catch {}
+    return false;
+  };
+
+  //如果首次 ping 成功，直接返回。
+  if (await ping()) {
+    return;
+  }
+  //等待一段时间
+  await wait(ms);
+
+  //轮询等待成功
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    if (document.visibilityState === "visible") {
+      //如果页面可见，尝试 ping。如果成功，跳出循环。
+      if (await ping()) {
+        break;
+      }
+      await wait(ms);
+    } else {
+      //如果页面不可见，调用 waitForWindowShow() 等待页面显示。
+      await waitForWindowShow();
+    }
+  }
+}
+
+function wait(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function waitForWindowShow() {
+  return new Promise<void>((resolve) => {
+    const onChange = async () => {
+      if (document.visibilityState === "visible") {
+        resolve();
+        document.removeEventListener("visibilitychange", onChange);
+      }
+    };
+    document.addEventListener("visibilitychange", onChange);
+  });
 }
