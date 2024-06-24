@@ -399,7 +399,7 @@ function notifyListeners(event: string, data: any): void {
  * 
  */
 
-function createHotContext(ownerPath: string): ViteHotContext {
+export function createHotContext(ownerPath: string): ViteHotContext {
   return new HMRContext(hmrClient, ownerPath);
 }
 

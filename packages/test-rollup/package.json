@@ -1,0 +1,18 @@
+{
+  "name": "test-rollup",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "dev": "rollup --config rollup.config.ts "
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "rollup": "^4.13.0"
+  },
+  "devDependencies": {
+    "@rollup/plugin-typescript": "^11.1.6"
+  }
+}

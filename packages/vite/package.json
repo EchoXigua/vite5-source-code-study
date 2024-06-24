@@ -1,22 +1,39 @@
 {
   "name": "vite",
   "version": "1.0.0",
+  "type": "module",
   "description": "",
   "bin": "bin/vite.js",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "pnpm run build-bundle -w",
-    "build-bundle": "rollup --config rollup.config.ts "
+    "cli": "",
+    "build-bundle": "rollup --config rollup.config.ts --configPlugin typescript"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@rollup/plugin-typescript": "^11.1.6",
+    "esbuild": "^0.20.1",
+    "postcss": "^8.4.38",
     "rollup": "^4.13.0"
   },
   "devDependencies": {
-    "@rollup/plugin-node-resolve": "^15.2.3"
+    "@rollup/plugin-commonjs": "^26.0.1",
+    "@rollup/plugin-json": "^6.1.0",
+    "@rollup/plugin-node-resolve": "^15.2.3",
+    "@rollup/plugin-typescript": "^11.1.6",
+    "@rollup/pluginutils": "^5.1.0",
+    "@types/pnpapi": "^0.0.5",
+    "cac": "^6.7.14",
+    "dep-types": "link:./src/types",
+    "dotenv": "^16.4.5",
+    "dotenv-expand": "^11.0.6",
+    "lightningcss": "^1.25.0",
+    "magic-string": "^0.30.10",
+    "picocolors": "^1.0.1",
+    "picomatch": "^2.3.1",
+    "tslib": "^2.6.3"
   }
 }
