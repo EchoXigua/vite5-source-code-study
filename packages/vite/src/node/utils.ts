@@ -4,7 +4,11 @@ import path from "node:path";
 import { URL, fileURLToPath } from "node:url";
 import { builtinModules, createRequire } from "node:module";
 import { isWindows, slash } from "../shared/utils";
-import { type PackageCache, resolvePackageData } from "./packages";
+import {
+  type PackageCache,
+  findNearestPackageData,
+  resolvePackageData,
+} from "./packages";
 
 import { createFilter as _createFilter } from "@rollup/pluginutils";
 
@@ -38,6 +42,41 @@ export async function asyncFlatten<T>(arr: T[]): Promise<T[]> {
 
 export function normalizePath(id: string): string {
   return path.posix.normalize(isWindows ? slash(id) : id);
+}
+
+//Node.js（Node, Deno, Bun） 支持的内置模块命名空间前缀为 node:
+const NODE_BUILTIN_NAMESPACE = "node:";
+//Deno 支持的内置模块命名空间，前缀为 npm:。
+const NPM_BUILTIN_NAMESPACE = "npm:";
+// Bun 支持的内置模块命名空间，前缀为 bun:。
+const BUN_BUILTIN_NAMESPACE = "bun:";
+
+// 有些运行时(如Bun)在这里注入了命名空间模块，这不是一个内置的节点,所以通过: 做过滤
+
+//builtinModules: 这是一个数组，包含 Node.js 的所有内置模块名称，例如 fs、path 等。
+//通过 .filter 方法过滤掉所有包含 : 的模块名称，这些模块名称被认为是带有命名空间的模块。
+//Node.js 内置模块名称不包含 :，因此这一步是为了获取纯粹的 Node.js 内置模块列表
+const nodeBuiltins = builtinModules.filter((id) => !id.includes(":"));
+
+//用于判断给定的模块 ID 是否是内置模块，这里函数考虑了多种运行时环境（Node.js、Deno、Bun）中的内置模块命名空间。
+export function isBuiltin(id: string): boolean {
+  if (process.versions.deno && id.startsWith(NPM_BUILTIN_NAMESPACE))
+    //当前运行环境是 Deno，是否以npm: 开头，
+    return true;
+
+  //示当前运行环境是 Bun，是否以bun: 开头
+  if (process.versions.bun && id.startsWith(BUN_BUILTIN_NAMESPACE)) return true;
+
+  //调用 isNodeBuiltin 函数判断 id 是否是一个 Node.js 内置模块。
+  return isNodeBuiltin(id);
+}
+
+export function isNodeBuiltin(id: string): boolean {
+  //如果以node: 开头，这是一个带命名空间的 Node.js 内置模块
+  if (id.startsWith(NODE_BUILTIN_NAMESPACE)) return true;
+
+  //检查 nodeBuiltins 数组是否包含 id。如果包含，则返回 true，表示这是一个 Node.js 原生内置模块。
+  return nodeBuiltins.includes(id);
 }
 
 function mergeConfigRecursively(
@@ -165,14 +204,16 @@ function normalizeSingleAlias({ find, replacement, customResolver }: any) {
   return alias;
 }
 
+/**
+ * 用于同步地获取文件或目录的状态信息。这个方法返回一个 fs.Stats 对象，
+ * 其中包含有关文件或目录的详细信息，例如大小、创建时间、修改时间等
+ *
+ * @param file
+ * @returns
+ */
 export function tryStatSync(file: string): fs.Stats | undefined {
   try {
-    // The "throwIfNoEntry" is a performance optimization for cases where the file does not exist
-
     /**
-     * 用于同步地获取文件或目录的状态信息。这个方法返回一个 fs.Stats 对象，
-     * 其中包含有关文件或目录的详细信息，例如大小、创建时间、修改时间等
-     *
      * throwIfNoEntry 为false 表示在文件或目录不存在时不抛出错误，而是返回 undefined。
      */
     return fs.statSync(file, { throwIfNoEntry: false });
@@ -206,3 +247,31 @@ export const requireResolveFromRootWithFallback = (
   // Search in the root directory first, and fallback to the default require paths.
   return _require.resolve(id, { paths: [root, _dirname] });
 };
+
+/**
+ * 用于确定给定的文件路径是否是 ECMAScript 模块（ESM）
+ *
+ * @param filePath 要检查的文件路径。
+ * @param packageCache 可选的包缓存，用于提高查找 package.json 文件的效率。
+ * @returns
+ */
+export function isFilePathESM(
+  filePath: string,
+  packageCache?: PackageCache
+): boolean {
+  if (/\.m[jt]s$/.test(filePath)) {
+    //如果文件扩展名是 .mjs 或 .mts，直接返回 true，表示这是一个 ESM 模块。
+    return true;
+  } else if (/\.c[jt]s$/.test(filePath)) {
+    //如果文件扩展名是 .cjs 或 .cts，直接返回 false，表示这是一个 CommonJS 模块。
+    return false;
+  } else {
+    //检查 package.json 中的 type: "module"
+    try {
+      const pkg = findNearestPackageData(path.dirname(filePath), packageCache);
+      return pkg?.data.type === "module";
+    } catch {
+      return false;
+    }
+  }
+}

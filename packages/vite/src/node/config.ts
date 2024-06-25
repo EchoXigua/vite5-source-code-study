@@ -1,10 +1,22 @@
+import fs from "node:fs";
+//fsp 以promise 形式返回结果
+import fsp from "node:fs/promises";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
+
+import { build } from "esbuild";
+
 import type { RollupOptions } from "rollup";
 import type { Alias, AliasOptions } from "dep-types/alias";
 
 import {
   asyncFlatten,
+  createDebugger,
+  isBuiltin,
   isExternalUrl,
+  isFilePathESM,
+  isNodeBuiltin,
+  isObject,
   mergeAlias,
   mergeConfig,
   normalizeAlias,
@@ -14,6 +26,7 @@ import type { HookHandler, Plugin, PluginWithRequiredHook } from "./plugin";
 
 import {
   CLIENT_ENTRY,
+  DEFAULT_CONFIG_FILES,
   ENV_ENTRY,
   FS_PREFIX,
   DEFAULT_EXTENSIONS,
@@ -26,6 +39,8 @@ import { resolveBuildOptions } from "./build";
 import type { LogLevel, Logger } from "./logger";
 import { createLogger } from "./logger";
 import type { InternalResolveOptions, ResolveOptions } from "./plugins/resolve";
+import { resolvePlugin, tryNodeResolve } from "./plugins/resolve";
+
 import {
   type CSSOptions,
   type ResolvedCSSOptions,
@@ -47,6 +62,8 @@ import type {
 import type { ResolvedSSROptions, SSROptions } from "./ssr";
 import type { PackageCache } from "./packages";
 import { findNearestPackageData } from "./packages";
+
+const debug = createDebugger("vite:config");
 
 export interface ConfigEnv {
   /**
@@ -183,6 +200,12 @@ export interface UserConfig {
    * 此字段下的功能仅遵循补丁版本的语义版本控制，它们可能会在未来的小版本中被删除。请在使用这些功能时始终锁定 Vite 的小版本。
    */
   legacy?: LegacyOptions;
+
+  /**
+   * Log level.
+   * @default 'info'
+   */
+  logLevel?: LogLevel;
 
   /**
    * 自定义日志记录器。
@@ -388,12 +411,12 @@ export type ResolveFn = (
  * @returns
  */
 export async function resolveConfig(
-  inlineConfig: any,
+  inlineConfig: InlineConfig,
   command: "build" | "serve",
   defaultMode = "development",
   defaultNodeEnv = "development",
   isPreview = false
-) {
+): Promise<ResolvedConfig> {
   let config = inlineConfig;
   //初始化配置文件依赖数组
   let configFileDependencies: string[] = [];
@@ -401,7 +424,7 @@ export async function resolveConfig(
   let mode = inlineConfig.mode || defaultMode;
   //是否设置NODE_ENV
   const isNodeEnvSet = !!process.env.NODE_ENV;
-  const packageCache = new Map();
+  const packageCache: PackageCache = new Map();
 
   //一些依赖项，例如@vue/compiler-*依赖于NODE_ENV来获取特定于生产环境的行为，所以要尽早设置它
   if (!isNodeEnvSet) {
@@ -425,6 +448,7 @@ export async function resolveConfig(
       config.logLevel,
       config.customLogger
     );
+    //如果存在配置文件，则开始合并配置
     if (loadResult) {
       config = mergeConfig(loadResult.config, config);
       configFile = loadResult.path;
@@ -858,6 +882,17 @@ export async function resolveConfig(
   return resolved;
 }
 
+/**
+ * 主要用于从文件中加载用户配置。它处理了不同路径的配置文件查找和加载逻辑，
+ * 并通过打包和执行配置文件来解析配置。
+ *
+ * @param configEnv
+ * @param configFile 配置文件的路径。如果没有提供，函数会在默认配置文件列表中查找。
+ * @param configRoot 配置文件的根目录，默认为当前工作目录 (process.cwd()）
+ * @param logLevel 日志级别
+ * @param customLogger 自定义日志记录器
+ * @returns 返回一个包含配置文件路径、配置对象以及配置文件依赖项的对象，或者在没有找到配置文件时返回 null。
+ */
 export async function loadConfigFromFile(
   configEnv: ConfigEnv,
   configFile?: string,
@@ -866,22 +901,24 @@ export async function loadConfigFromFile(
   customLogger?: Logger
 ): Promise<{
   path: string;
-  config: any;
+  config: UserConfig;
   dependencies: string[];
 } | null> {
+  //用于计算加载配置文件所花费的时间。
   const start = performance.now();
   const getTime = () => `${(performance.now() - start).toFixed(2)}ms`;
 
   let resolvedPath: string | undefined;
 
+  //解析配置文件路径
   if (configFile) {
-    // explicit config path is always resolved from cwd
+    //如果提供了 configFile 参数，解析该路径。
     resolvedPath = path.resolve(configFile);
   } else {
-    // implicit config file loaded from inline root (if present)
-    // otherwise from cwd
+    //在默认配置文件列表（DEFAULT_CONFIG_FILES）中查找第一个存在的文件。
     for (const filename of DEFAULT_CONFIG_FILES) {
       const filePath = path.resolve(configRoot, filename);
+      //如果文件不存在，继续往后查找，找到后退出，existsSync是同步方法
       if (!fs.existsSync(filePath)) continue;
 
       resolvedPath = filePath;
@@ -889,15 +926,34 @@ export async function loadConfigFromFile(
     }
   }
 
+  //如果配置文件没有找到，给出警告并返回
   if (!resolvedPath) {
-    debug?.("no config file found.");
+    debug?.("配置文件没有找到");
     return null;
   }
 
+  //检查文件是否为 ESM 模块：
   const isESM = isFilePathESM(resolvedPath);
 
   try {
+    //打包配置文件，打包的原因可能是为了处理不同模块系统（如 ESM 和 CommonJS）的兼容性问题。
+    /**
+     * bundleConfigFile 函数的目的是使用 esbuild 将配置文件及其依赖项打包成一个独立的 JavaScript 文件。
+     *
+     * 为什么要打包呢？
+     *
+     * 1. 兼容性处理：配置文件可能使用了最新的 ECMAScript 语法或者 TypeScript，
+     * 需要通过打包工具进行转译，使其兼容当前的 Node.js 环境
+     *
+     * 2. 模块系统兼容性：
+     *    1. 配置文件可以是 ESM 或 CommonJS 模块，打包后统一处理可以避免在代码中处理不同模块系统的复杂性。
+     *    2. ESM 模块在 Node.js 中需要异步加载，而 CommonJS 模块是同步加载的。打包可以将不同类型的模块统一成一个格式
+     *
+     * 3. 依赖解析：配置文件可能依赖其他文件或模块，打包可以将所有依赖打包成一个文件，简化加载逻辑。
+     */
     const bundled = await bundleConfigFile(resolvedPath, isESM);
+
+    //从打包后的代码中加载配置，根据配置文件导出内容的类型（函数或对象），调用配置文件获取最终配置对象
     const userConfig = await loadConfigFromBundledFile(
       resolvedPath,
       bundled.code,
@@ -1002,4 +1058,220 @@ export function resolveBaseUrl(
   }
 
   return base;
+}
+
+/**
+ * 用于打包配置文件的异步函数。它使用 esbuild 来打包指定的配置文件，并返回打包后的代码和依赖项列表
+ *
+ * @param fileName 要打包的配置文件的路径
+ * @param isESM
+ * @returns
+ */
+async function bundleConfigFile(
+  fileName: string,
+  isESM: boolean
+): Promise<{ code: string; dependencies: string[] }> {
+  //定义了一些变量名用于注入文件路径信息。
+  const dirnameVarName = "__vite_injected_original_dirname";
+  const filenameVarName = "__vite_injected_original_filename";
+  const importMetaUrlVarName = "__vite_injected_original_import_meta_url";
+
+  //使用 esbuild 的 build 函数来打包配置文件
+  //esbuild 中文文档 https://esbuild.bootcss.com/api
+  const result = await build({
+    absWorkingDir: process.cwd(), //设置当前工作目录
+    entryPoints: [fileName], //设置入口文件为 fileName，如 entryPoints: ['home.ts', 'settings.ts'],
+    write: false, //设置为 false，表示不写入文件系统
+    target: ["node18"], //设置打包目标为 node18
+
+    //默认情况下，esbuild 的打包器为浏览器生成代码。
+    //如果你打包好的代码想要在 node 环境中运行，你应该设置 platform 为 node：
+    platform: "node",
+    bundle: true, // 设置为 true，表示需要打包
+    format: isESM ? "esm" : "cjs",
+
+    //当你在 node 中导入一个包时，包中的 package.json 文件的 main 字段会决定导入哪个文件
+    //包括 esbuild 在内的主流打包器允许你在解析包是额外指定一个 package.json 字段
+    //通常至少有三个这样的字段：main、module、browser
+    mainFields: ["main"], // 设置主字段为 main
+
+    //当为 inline时 插入整个 source map 到 .js 文件中而不是单独生成一个 .js.map 文件
+    sourcemap: "inline",
+
+    //该配置告诉 esbuild 以 JSON 格式生成一些构建相关的元数据
+    metafile: true,
+
+    //该特性提供了一种用常量表达式替换全局标识符的方法。
+    //它可以在不改变代码本身的情况下改变某些构建之间代码的行为:
+    //还记得vite 在一开始注入的一些全局变量吗，在这里做了替换
+    define: {
+      __dirname: dirnameVarName,
+      __filename: filenameVarName,
+      "import.meta.url": importMetaUrlVarName,
+      "import.meta.dirname": dirnameVarName,
+      "import.meta.filename": filenameVarName,
+    },
+
+    //这里写了两个自定义插件
+    plugins: [
+      //这个插件的主要作用是将外部依赖进行外部化处理，
+      //以确保在打包时不会将所有依赖都打包进来，而是将一些特定的依赖保持为外部依赖
+      {
+        name: "externalize-deps",
+        setup(build) {
+          //缓存包信息，以提高解析性能
+          const packageCache = new Map();
+
+          //使用 Vite 的 tryNodeResolve 方法解析模块路径
+          const resolveByViteResolver = (
+            id: string, //要解析的模块标识符
+            importer: string, //导入该模块的文件路径
+            isRequire: boolean //布尔值，表示解析时是否使用 require
+          ) => {
+            //tryNodeResolve 方法会返回一个解析结果对象，如果解析成功，会包含 id 属性表示解析后的路径。
+            //resolveByViteResolver 函数最终返回该路径。
+            return tryNodeResolve(
+              id,
+              importer,
+              {
+                root: path.dirname(fileName), //解析的根目录，这里设为配置文件的目录
+                isBuild: true, //表示是否处于构建阶段
+                isProduction: true, //表示是否处于生产模式
+                preferRelative: false, //表示是否优先解析相对路径
+                tryIndex: true, //表示是否尝试解析为索引文件
+                mainFields: [], //主字段数组，用于指定包的主入口字段，这里设为空数组，表示不使用任何主字段
+                conditions: [], //条件数组，用于指定解析条件，这里设为空数组，表示没有特殊条件。
+                overrideConditions: ["node"], //覆盖条件数组，这里设为 ["node"]，表示使用 Node.js 环境条件。
+                dedupe: [], //去重数组，这里设为空数组，表示不进行去重
+                extensions: DEFAULT_EXTENSIONS, //扩展名数组，表示要解析的文件扩展名，通常包含 .js, .ts, .json 等，这里使用 DEFAULT_EXTENSIONS 常量
+                preserveSymlinks: false, //表示是否保留符号链接
+                packageCache, //包缓存，用于提高解析性能
+                isRequire, //表示是否使用 require 进行解析
+              },
+              false
+            )?.id;
+          };
+
+          //这个钩子处理所有非相对路径和非绝对路径的模块解析请求
+          build.onResolve(
+            //监听所有非相对路径（以 . 开头）和非绝对路径（以 / 开头）的模块。
+            { filter: /^[^.].*/ },
+            async ({ path: id, importer, kind }) => {
+              //如果是一个入口点模块、如果 id 是绝对路径、如果 id 是 Node.js 内置模块 直接返回
+              if (
+                kind === "entry-point" ||
+                path.isAbsolute(id) ||
+                isNodeBuiltin(id)
+              ) {
+                return;
+              }
+
+              // With the `isNodeBuiltin` check above, this check captures if the builtin is a
+              // non-node built-in, which esbuild doesn't know how to handle. In that case, we
+              // externalize it so the non-node runtime handles it instead.
+              /**
+               * 使用上面的' isNodeBuiltin '检查，这个检查会捕获内置是否是一个非节点内置，
+               * 而esbuild不知道如何处理。在这种情况下，我们将其外部化，以便由非节点运行时处理它。
+               */
+              if (isBuiltin(id)) {
+                //如果 id 是非 Node.js 内置模块，将模块标记为外部模块 { external: true }。
+                return { external: true };
+              }
+
+              //如果模块是 ESM 或动态导入，设置 isImport 为 true。
+              const isImport = isESM || kind === "dynamic-import";
+              let idFsPath: string | undefined;
+              try {
+                idFsPath = resolveByViteResolver(id, importer, !isImport);
+              } catch (e) {
+                //这里主要是对 esm 中使用 requried 导入做一些错误提示
+                if (!isImport) {
+                  let canResolveWithImport = false;
+                  try {
+                    canResolveWithImport = !!resolveByViteResolver(
+                      id,
+                      importer,
+                      false
+                    );
+                  } catch {}
+                  if (canResolveWithImport) {
+                    throw new Error(
+                      `Failed to resolve ${JSON.stringify(
+                        id
+                      )}. This package is ESM only but it was tried to load by \`require\`. See https://vitejs.dev/guide/troubleshooting.html#this-package-is-esm-only for more details.`
+                    );
+                  }
+                }
+                throw e;
+              }
+
+              //如果 idFsPath 存在并且是导入模块，将文件路径转换为文件 URL。
+              if (idFsPath && isImport) {
+                idFsPath = pathToFileURL(idFsPath).href;
+              }
+
+              //如果 idFsPath 存在并且不是导入模块，检查文件是否为 ESM。
+              //如果是，则抛出错误，因为 ESM 文件不能被 require 加载。
+              if (
+                idFsPath &&
+                !isImport &&
+                isFilePathESM(idFsPath, packageCache)
+              ) {
+                throw new Error(
+                  `${JSON.stringify(
+                    id
+                  )} resolved to an ESM file. ESM file cannot be loaded by \`require\`. See https://vitejs.dev/guide/troubleshooting.html#this-package-is-esm-only for more details.`
+                );
+              }
+              //返回解析结果
+              return {
+                path: idFsPath,
+                external: true,
+              };
+            }
+          );
+        },
+      },
+      {
+        //用于向特定类型的文件（JavaScript 和 TypeScript 文件）注入一些全局变量
+        //这些变量包括文件的目录名、文件名和文件的 URL。这在一些需要知道文件路径或 URL 的场景中非常有用
+        name: "inject-file-scope-variables",
+        //esbuild 在构建过程开始时调用此函数，以便插件可以注册钩子
+        setup(build) {
+          //esbuild 在加载文件时调用这个钩子，这里匹配的是以 .cjs、.mjs、.js、.ts 结尾的文件
+          build.onLoad({ filter: /\.[cm]?[jt]s$/ }, async (args) => {
+            //使用 fsp.readFile 异步读取文件内容。
+            const contents = await fsp.readFile(args.path, "utf-8");
+
+            //注入变量
+            const injectValues =
+              `const ${dirnameVarName} = ${JSON.stringify(
+                path.dirname(args.path)
+              )};` +
+              `const ${filenameVarName} = ${JSON.stringify(args.path)};` +
+              `const ${importMetaUrlVarName} = ${JSON.stringify(
+                pathToFileURL(args.path).href
+              )};`;
+
+            /**
+             * __vite_injected_original_dirname：文件所在目录。
+             * __vite_injected_original_filename：文件名。
+             * __vite_injected_original_import_meta_url：文件的 URL。
+             */
+
+            //返回修改后的文件内容：
+            return {
+              loader: args.path.endsWith("ts") ? "ts" : "js",
+              contents: injectValues + contents,
+            };
+          });
+        },
+      },
+    ],
+  });
+  const { text } = result.outputFiles[0];
+  return {
+    code: text,
+    dependencies: result.metafile ? Object.keys(result.metafile.inputs) : [],
+  };
 }
