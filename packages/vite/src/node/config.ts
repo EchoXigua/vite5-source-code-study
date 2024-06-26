@@ -3,6 +3,8 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { createRequire } from "node:module";
+import { promisify } from "node:util";
 
 import { build } from "esbuild";
 
@@ -64,6 +66,7 @@ import type { PackageCache } from "./packages";
 import { findNearestPackageData } from "./packages";
 
 const debug = createDebugger("vite:config");
+const promisifiedRealpath = promisify(fs.realpath);
 
 export interface ConfigEnv {
   /**
@@ -77,6 +80,17 @@ export interface ConfigEnv {
 }
 
 export type AppType = "spa" | "mpa" | "custom";
+
+export type UserConfigFnObject = (env: ConfigEnv) => UserConfig;
+export type UserConfigFnPromise = (env: ConfigEnv) => Promise<UserConfig>;
+export type UserConfigFn = (env: ConfigEnv) => UserConfig | Promise<UserConfig>;
+
+export type UserConfigExport =
+  | UserConfig
+  | Promise<UserConfig>
+  | UserConfigFnObject
+  | UserConfigFnPromise
+  | UserConfigFn;
 
 export type PluginOption =
   | Plugin
@@ -1274,4 +1288,93 @@ async function bundleConfigFile(
     code: text,
     dependencies: result.metafile ? Object.keys(result.metafile.inputs) : [],
   };
+}
+
+interface NodeModuleWithCompile extends NodeModule {
+  _compile(code: string, filename: string): any;
+}
+
+const _require = createRequire(import.meta.url);
+/**
+ * 用来从打包后的配置文件中加载配置对象的函数。它根据配置文件的类型（ESM 或 CJS）采取不同的加载方式
+ *
+ * @param fileName
+ * @param bundledCode
+ * @param isESM
+ * @returns
+ */
+async function loadConfigFromBundledFile(
+  fileName: string,
+  bundledCode: string,
+  isESM: boolean
+): Promise<UserConfigExport> {
+  // for esm, before we can register loaders without requiring users to run node
+  // with --experimental-loader themselves, we have to do a hack here:
+  // write it to disk, load it with native Node ESM, then delete the file.
+
+  if (isESM) {
+    //处理esm 配置文件
+    const fileBase = `${fileName}.timestamp-${Date.now()}-${Math.random()
+      .toString(16)
+      .slice(2)}`;
+
+    //创建一个唯一的临时文件名 fileNameTmp
+    const fileNameTmp = `${fileBase}.mjs`;
+    //使用 pathToFileURL 生成文件的 URL
+    const fileUrl = `${pathToFileURL(fileBase)}.mjs`;
+
+    //将打包后的代码写入临时文件名 fileNameTmp
+    await fsp.writeFile(fileNameTmp, bundledCode);
+
+    try {
+      //通过 import 关键字动态导入临时文件
+      return (await import(fileUrl)).default;
+    } finally {
+      //在导入后，临时文件会被删除以释放磁盘空间。
+      fs.unlink(fileNameTmp, () => {}); // Ignore errors
+    }
+  }
+  // 对于cjs，我们可以通过_require.extensions注册一个自定义加载器
+  else {
+    //处理cjs 文件
+
+    //获取文件扩展名，例如 .js, .ts, .mjs 等
+    const extension = path.extname(fileName);
+
+    // We don't use fsp.realpath() here because it has the same behaviour as
+    // fs.realpath.native. On some Windows systems, it returns uppercase volume
+    // letters (e.g. "C:\") while the Node.js loader uses lowercase volume letters.
+    // See https://github.com/vitejs/vite/issues/12923
+
+    //获取真实文件名
+    const realFileName = await promisifiedRealpath(fileName);
+
+    //检查配置文件的扩展名是否已经注册了加载器，如果没有，则默认为 .js
+    const loaderExt = extension in _require.extensions ? extension : ".js";
+    //备份当前注册的加载器，以便稍后恢复使用
+    const defaultLoader = _require.extensions[loaderExt]!;
+
+    // 替换默认的模块加载器，用打包后的代码进行加载
+    _require.extensions[loaderExt] = (module: NodeModule, filename: string) => {
+      //定义一个新的加载器函数。
+      if (filename === realFileName) {
+        //如果文件名匹配 realFileName，则使用 bundledCode 替换原始代码，并使用 _compile 方法编译模块
+        (module as NodeModuleWithCompile)._compile(bundledCode, filename);
+      } else {
+        //否则，继续使用默认的加载器加载其他文件
+        defaultLoader(module, filename);
+      }
+    };
+
+    // 删除 Node.js 模块缓存中与配置文件相关联的条目。这确保了在下一次加载配置文件时，使用的是新的代码内容。
+    delete _require.cache[_require.resolve(fileName)];
+    // 使用 `_require` 加载文件，获取原始导出对象
+    const raw = _require(fileName);
+
+    // 恢复默认的模块加载器
+    _require.extensions[loaderExt] = defaultLoader;
+
+    // 如果是 ES 模块，则返回默认导出；否则直接返回原始对象
+    return raw.__esModule ? raw.default : raw;
+  }
 }
