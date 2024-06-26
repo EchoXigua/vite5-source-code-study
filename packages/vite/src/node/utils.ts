@@ -33,13 +33,53 @@ export function arraify<T>(target: T | T[]): T[] {
   return Array.isArray(target) ? target : [target];
 }
 
+//对包含异步任务的嵌套数组进行展平操作，并确保所有异步任务都已完成
 export async function asyncFlatten<T>(arr: T[]): Promise<T[]> {
   do {
+    //对传入的数组进行 Promise.all 操作，等待所有异步任务完成，
+    //然后使用 flat(Infinity) 方法对数组进行无限深度展平
+    //此时展开后的数组，可能还有promise，需要通过检查arr 里面是否还有promise
+    //如果有通过await promise.all 将数组中的异步任务完成
     arr = (await Promise.all(arr)).flat(Infinity) as any;
   } while (arr.some((v: any) => v?.then));
+  //some 方法检查数组中是否仍有未完成的 Promise
+  //如果某个值 v 有 then 方法（即它是一个 Promise），则继续循环
+  //在 do...while 循环中，不断对数组进行 Promise.all 和 flat 操作，直到数组中不再包含任何未完成的 Promise。
+
   return arr;
+  /**
+   * demo：
+   * const nestedPromises = [
+      Promise.resolve([1, 2, Promise.resolve([3, 4, Promise.resolve(5)])]),
+      6,
+      [7, Promise.resolve(8)]
+    ];
+
+    asyncFlatten(nestedPromises).then(flattened => {
+      console.log(flattened); // 输出: [1, 2, 3, 4, 5, 6, 7, 8]
+    });
+   */
 }
 
+/**
+ * 将路径转换为 POSIX 规范化格式，以确保路径在不同操作系统上具有一致的表示形式。
+ * 特别是，它会将 Windows 上的路径转换为使用斜杠 (/) 的形式。
+ * 
+ *
+ * @param id
+ * @returns
+ * 
+ * @example
+ *  windows:
+ *  const path = 'C:\\Users\\John\\Documents\\project';
+    console.log(normalizePath(path));  //输出: 'C:/Users/John/Documents/project'
+
+    非windows:
+    const path = '/Users/John/Documents/project';
+    console.log(normalizePath(path)); //输出: '/Users/John/Documents/project'
+ * 
+ * 
+ */
 export function normalizePath(id: string): string {
   return path.posix.normalize(isWindows ? slash(id) : id);
 }

@@ -40,6 +40,8 @@ import { resolveBuildOptions } from "./build";
 
 import type { LogLevel, Logger } from "./logger";
 import { createLogger } from "./logger";
+
+import { getHookHandler, getSortedPluginsByHook } from "./plugins";
 import type { InternalResolveOptions, ResolveOptions } from "./plugins/resolve";
 import { resolvePlugin, tryNodeResolve } from "./plugins/resolve";
 
@@ -416,6 +418,38 @@ export type ResolveFn = (
 ) => Promise<string | undefined>;
 
 /**
+ * 是检查给定的路径 path 中是否包含一些在使用 Vite 时可能会引发问题的特殊字符，比如 # 和 ?。
+ * 如果发现这些字符，函数会使用提供的 logger 对象记录警告信息，
+ * 建议用户考虑重命名目录以移除这些字符，以避免在 Vite 运行时出现问题。
+ *
+ * @param path
+ * @param logger
+ */
+function checkBadCharactersInPath(path: string, logger: Logger): void {
+  const badChars = [];
+
+  if (path.includes("#")) {
+    badChars.push("#");
+  }
+  if (path.includes("?")) {
+    badChars.push("?");
+  }
+
+  if (badChars.length > 0) {
+    const charString = badChars.map((c) => `"${c}"`).join(" and ");
+    const inflectedChars = badChars.length > 1 ? "characters" : "character";
+
+    logger.warn(
+      colors.yellow(
+        `The project root contains the ${charString} ${inflectedChars} (${colors.cyan(
+          path
+        )}), which may not work when running Vite. Consider renaming the directory to remove the characters.`
+      )
+    );
+  }
+}
+
+/**
  * 主要目的是解析和生成 Vite 的配置
  * @param inlineConfig 用户传递的内联配置
  * @param command 命令类型，可以是 'build' 或 'serve'
@@ -475,41 +509,48 @@ export async function resolveConfig(
   configEnv.mode = mode;
 
   //用于过滤插件
-  const filterany = (p: any) => {
+  const filterPlugin = (p: Plugin) => {
     if (!p) {
+      //插件不存在，return false 表示不包括这个插件
       return false;
     } else if (!p.apply) {
+      //如果插件 p 没有 apply 属性，返回 true，表示包括这个插件。
       return true;
     } else if (typeof p.apply === "function") {
+      //如果apply 为函数，调用这个函数并传入 config
+      //和 mode 的扩展对象及 configEnv，返回函数的执行结果。
       return p.apply({ ...config, mode }, configEnv);
     } else {
+      //检查 apply 属性是否为特定值：
       return p.apply === command;
     }
   };
 
-  // resolve anys
-  const rawUseranys = ((await asyncFlatten(config.anys || [])) as any[]).filter(
-    filterany
-  );
-  //过滤用户插件，并将其按优先级分类（prePlugins, normalPlugins, postPlugins）。
-  const [preanys, normalanys, postanys] = sortUseranys(rawUseranys);
+  // 主要目的是处理和过滤插件数组，首先展平并解析包含异步任务的插件数组，然后使用过滤函数过滤出有效的插件
+  const rawUserPlugins = (
+    (await asyncFlatten(config.plugins || [])) as any[]
+  ).filter(filterPlugin);
+
+  //插件排序，并将其按优先级分类（prePlugins, normalPlugins, postPlugins）。
+  const [prePlugins, normalPlugins, postPlugins] =
+    sortUserPlugins(rawUserPlugins);
 
   //运行配置钩子
-  const useranys = [...preanys, ...normalanys, ...postanys];
-  config = await runConfigHook(config, useranys, configEnv);
+  const userPlugins = [...prePlugins, ...normalPlugins, ...postPlugins];
+  config = await runConfigHook(config, userPlugins, configEnv);
 
-  // Define logger
+  // 定义日志记录器
   const logger = createLogger(config.logLevel, {
     allowClearScreen: config.clearScreen,
     customLogger: config.customLogger,
   });
 
-  // 解析项目的根目录
+  // 主要目的是解析并规范化项目的根目录路径
   const resolvedRoot = normalizePath(
     config.root ? path.resolve(config.root) : process.cwd()
   );
 
-  //   checkBadCharactersInPath(resolvedRoot, logger);
+  checkBadCharactersInPath(resolvedRoot, logger);
 
   //定义客户端别名
   const clientAlias = [
@@ -997,37 +1038,53 @@ export async function loadConfigFromFile(
   }
 }
 
-export function sortUseranys(
-  anys: (any | any[])[] | undefined
-): [any[], any[], any[]] {
-  const preanys: any[] = [];
-  const postanys: any[] = [];
-  const normalanys: any[] = [];
+//插件排序
+export function sortUserPlugins(
+  plugins: (Plugin | Plugin[])[] | undefined
+): [Plugin[], Plugin[], Plugin[]] {
+  const preanys: Plugin[] = [];
+  const postanys: Plugin[] = [];
+  const normalanys: Plugin[] = [];
 
-  if (anys) {
-    anys.flat().forEach((p) => {
+  if (plugins) {
+    plugins.flat().forEach((p) => {
+      //这个插件应该在其他插件之前运行
       if (p.enforce === "pre") preanys.push(p);
+      //这个插件应该在其他插件之后运行
       else if (p.enforce === "post") postanys.push(p);
+      //默认归为 normalPlugins
       else normalanys.push(p);
     });
   }
-
+  //分别表示预处理插件、正常处理插件和后处理插件。
   return [preanys, normalanys, postanys];
 }
 
+/**
+ * 用于依次执行插件的 config 钩子函数，并将钩子函数的返回结果合并到当前配置中
+ *
+ * @param config 初始配置对象
+ * @param plugins 插件数组
+ * @param configEnv 配置环境对象
+ * @returns 最终返回一个合并后的配置对象。
+ */
 async function runConfigHook(
-  config: any,
-  plugins: any[],
+  config: InlineConfig,
+  plugins: Plugin[],
   configEnv: ConfigEnv
-): Promise<any> {
+): Promise<InlineConfig> {
   let conf = config;
 
   for (const p of getSortedPluginsByHook("config", plugins)) {
+    //获取当前插件的 config 钩子。
     const hook = p.config;
+    //获取钩子的处理函数 handler
     const handler = getHookHandler(hook);
     if (handler) {
+      //执行钩子函数
       const res = await handler(conf, configEnv);
       if (res) {
+        //如果 res 存在，则调用 mergeConfig 函数将 res 合并到当前配置 conf 中。
         conf = mergeConfig(conf, res);
       }
     }
