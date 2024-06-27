@@ -297,23 +297,28 @@ export const isExternalUrl = (url: string): boolean => externalRE.test(url);
 const _dirname = path.dirname(fileURLToPath(import.meta.url));
 const _require = createRequire(import.meta.url);
 
+//用于解析相对于指定根目录 (root) 的包模块 (id) 的路径
 export const requireResolveFromRootWithFallback = (
   root: string,
   id: string
 ): string => {
-  // check existence first, so if the package is not found,
-  // it won't be cached by nodejs, since there isn't a way to invalidate them:
+  //首先检查是否存在，所以如果没有找到包，它不会被nodejs缓存，因为没有办法使它们无效
   // https://github.com/nodejs/node/issues/44663
+
+  //它尝试使用 resolvePackageData 函数从两个不同的位置解析包
   const found =
     resolvePackageData(id, root) || resolvePackageData(id, _dirname);
   if (!found) {
+    //如果包在任何位置都未找到 (!found)，则抛出错误，指示找不到该包 (id)。
+    //错误的代码标记为模块未找到 (MODULE_NOT_FOUND)。
     const error = new Error(`${JSON.stringify(id)} not found.`);
     (error as any).code = "MODULE_NOT_FOUND";
     throw error;
   }
 
-  // actually resolve
-  // Search in the root directory first, and fallback to the default require paths.
+  //找到了包，开始解析包。
+  //首先尝试从指定的 root 目录解析包 (root 在搜索路径数组中优先)。
+  //如果在该位置找不到，则会回退到默认的 Node.js require 路径 (_dirname)。
   return _require.resolve(id, { paths: [root, _dirname] });
 };
 

@@ -617,9 +617,15 @@ export async function resolveConfig(
     //加载指定模式下的环境变量文件
     loadEnv(mode, envDir, resolveEnvPrefix(config));
 
-  // Note it is possible for user to have a custom mode, e.g. `staging` where
-  // development-like behavior is expected. This is indicated by NODE_ENV=development
-  // loaded from `.staging.env` and set by us as VITE_USER_NODE_ENV
+  /**
+   * 主要处理的是根据 .env 文件中配置的 NODE_ENV 设置来决定当前的 Node.js 环境变量 process.env.NODE_ENV
+   * 它会根据用户配置的环境变量来决定是否将 process.env.NODE_ENV 设置为 development，并且会在特定情况下发出警告
+   *
+   * 为什么限制 NODE_ENV 为 "development"？
+   * 在开发环境中，某些工具和框架（例如 Vue）依赖于 NODE_ENV 的值来决定是否启用开发特性，例如热模块替换（HMR）
+   * 如果 NODE_ENV 被设置为 "production"，这些特性可能会被禁用，影响开发体验
+   * 因此，这段代码在环境变量文件中只支持将 NODE_ENV 设置为 "development"，并建议在 Vite 配置中设置其他 NODE_ENV 值。
+   */
   const userNodeEnv = process.env.VITE_USER_NODE_ENV;
   if (!isNodeEnvSet && userNodeEnv) {
     if (userNodeEnv === "development") {
@@ -638,17 +644,21 @@ export async function resolveConfig(
 
   //确定生产模式 isProduction 和构建模式 isBuild。
   const isBuild = command === "build";
+  //判断base URL 是否为相对路径的简写
   const relativeBaseShortcut = config.base === "" || config.base === "./";
 
-  // During dev, we ignore relative base and fallback to '/'
-  // For the SSR build, relative base isn't possible by means
-  // of import.meta.url.
+  /**
+   * 在开发过程中，我们忽略相对基础，并退回到“/”。
+   * 对于SSR构建，相对基础是不可能通过import.meta.url的方式实现的。
+   */
   const resolvedBase = relativeBaseShortcut
     ? !isBuild || config.build?.ssr
       ? "/"
       : "./"
     : resolveBaseUrl(config.base, isBuild, logger) ?? "/";
+  //如果 resolveBaseUrl 返回 null 或 undefined，则基准 URL 为 '/'
 
+  //用于解析构建选项，确保构建配置（config.build）中包含所有必要的信息
   const resolvedBuildOptions = resolveBuildOptions(
     config.build,
     logger,
@@ -1124,11 +1134,25 @@ async function runConfigHook(
   return conf;
 }
 
+/**
+ * 用于解析和验证 Vite 配置中的 base 选项
+ * 确保 base 选项符合特定的格式和规则，并在必要时发出警告
+ *
+ * base 选项在 Vite 配置中用于指定资源的基准 URL。
+ * 例如，当 base 设置为 '/' 时，资源路径相对于服务器的根路径。
+ * 当 base 设置为 './' 时，资源路径相对于当前目录。
+ *
+ * @param base 默认为 '/'，这是 Vite 配置中的 base 选项，用于指定资源的基准 URL。
+ * @param isBuild 表示当前是否是构建命令
+ * @param logger 日志记录器，用于发出警告
+ * @returns
+ */
 export function resolveBaseUrl(
-  base: any["base"] = "/",
+  base: UserConfig["base"] = "/",
   isBuild: boolean,
   logger: Logger
 ): string {
+  //检查 base 是否以 . 开头
   if (base[0] === ".") {
     logger.warn(
       colors.yellow(
@@ -1138,22 +1162,24 @@ export function resolveBaseUrl(
         )
       )
     );
+    //如果 base 以 . 开头，发出警告，并将 base 设置为 '/'
+    //base 只能是绝对路径、./、空字符串
     return "/";
   }
 
-  // external URL flag
+  //检查 base 是否是外部 URL，（例如以 http:// 或 https:// 开头的 URL）
   const isExternal = isExternalUrl(base);
-  // no leading slash warn
+  //如果 base 不是外部 URL，并且不以 / 开头，发出警告，提示 base 选项应该以斜杠开头
   if (!isExternal && base[0] !== "/") {
     logger.warn(
       colors.yellow(colors.bold(`(!) "base" option should start with a slash.`))
     );
   }
 
-  // parse base when command is serve or base is not External URL
+  //如果不是构建命令或者 base 不是外部 URL，将 base 解析为一个 URL，并获取其路径部分
   if (!isBuild || !isExternal) {
     base = new URL(base, "http://vitejs.dev").pathname;
-    // ensure leading slash
+    //确保路径以 / 开头，如果不以 / 开头，则添加 /
     if (base[0] !== "/") {
       base = "/" + base;
     }
