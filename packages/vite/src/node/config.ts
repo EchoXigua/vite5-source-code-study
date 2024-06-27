@@ -552,7 +552,9 @@ export async function resolveConfig(
 
   checkBadCharactersInPath(resolvedRoot, logger);
 
-  //定义客户端别名
+  //定义客户端别名,用于在打包过程中将特定模块路径映射到替换路径
+  //这样在 Vite 的打包过程中，当有模块路径匹配到 @vite/env 或 @vite/client 的正则表达式规则时，
+  //会被替换为相应的路径，从而实现路径的别名映射
   const clientAlias = [
     {
       find: /^\/?@vite\/env/,
@@ -569,7 +571,9 @@ export async function resolveConfig(
     mergeAlias(clientAlias, config.resolve?.alias || [])
   );
 
-  const resolveOptions: any["resolve"] = {
+  //结合用户配置和默认值，生成了一个统一的模块解析配置对象
+  //这个对象可以用于模块打包工具，以确定如何解析模块导入路径，从而简化和优化模块解析过程。
+  const resolveOptions: ResolvedConfig["resolve"] = {
     mainFields: config.resolve?.mainFields ?? DEFAULT_MAIN_FIELDS,
     conditions: config.resolve?.conditions ?? [],
     extensions: config.resolve?.extensions ?? DEFAULT_EXTENSIONS,
@@ -578,12 +582,39 @@ export async function resolveConfig(
     alias: resolvedAlias,
   };
 
+  //没有设置浏览器字段，但又包含浏览器入口，则给出警告
+  if (
+    // @ts-expect-error removed field
+    config.resolve?.browserField === false &&
+    resolveOptions.mainFields.includes("browser")
+  ) {
+    logger.warn(
+      colors.yellow(
+        `\`resolve.browserField\` is set to false, but the option is removed in favour of ` +
+          `the 'browser' string in \`resolve.mainFields\`. You may want to update \`resolve.mainFields\` ` +
+          `to remove the 'browser' string and preserve the previous browser behaviour.`
+      )
+    );
+  }
+
   //解析环境变量文件 .env files
+  /**
+   * 主要是用于设置环境变量目录 (envDir) 并加载用户环境变量 (userEnv)
+   * 通过解析用户配置和默认路径，将环境变量加载到配置中，以便在应用程序中使用这些变量
+   * 
+   *  config.envDir：用户在配置中指定的环境变量目录。
+      resolvedRoot：解析后的项目根目录。
+      path.resolve：将相对路径解析为绝对路径。
+      normalizePath：标准化路径，确保跨平台兼容。
+   */
   const envDir = config.envDir
     ? normalizePath(path.resolve(resolvedRoot, config.envDir))
     : resolvedRoot;
+
+  //默认情况下，envFile 是启用的,如果行内配置没有设置envFile 为false，就加载env文件
   const userEnv =
     inlineConfig.envFile !== false &&
+    //加载指定模式下的环境变量文件
     loadEnv(mode, envDir, resolveEnvPrefix(config));
 
   // Note it is possible for user to have a custom mode, e.g. `staging` where

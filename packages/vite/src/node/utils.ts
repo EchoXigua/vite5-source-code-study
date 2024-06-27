@@ -3,14 +3,16 @@ import os from "node:os";
 import path from "node:path";
 import { URL, fileURLToPath } from "node:url";
 import { builtinModules, createRequire } from "node:module";
+import { createFilter as _createFilter } from "@rollup/pluginutils";
+
+import type { Alias, AliasOptions } from "dep-types/alias";
+
 import { isWindows, slash } from "../shared/utils";
 import {
   type PackageCache,
   findNearestPackageData,
   resolvePackageData,
 } from "./packages";
-
-import { createFilter as _createFilter } from "@rollup/pluginutils";
 
 /**
  * Inlined to keep `@rollup/pluginutils` in devDependencies
@@ -203,17 +205,19 @@ function backwardCompatibleWorkerPlugins(plugins: any) {
   return [];
 }
 
-export function mergeAlias(a?: any, b?: any) {
+export function mergeAlias(
+  a?: AliasOptions,
+  b?: AliasOptions
+): AliasOptions | undefined {
   if (!a) return b;
   if (!b) return a;
   if (isObject(a) && isObject(b)) {
     return { ...a, ...b };
   }
-  // the order is flipped because the alias is resolved from top-down,
-  // where the later should have higher priority
+  //顺序颠倒是因为别名是从自顶向下解析的，后者应该具有更高的优先级
   return [...normalizeAlias(b), ...normalizeAlias(a)];
 }
-export function normalizeAlias(o = []) {
+export function normalizeAlias(o: AliasOptions = []): Alias[] {
   return Array.isArray(o)
     ? o.map(normalizeSingleAlias)
     : Object.keys(o).map((find) =>
@@ -224,17 +228,42 @@ export function normalizeAlias(o = []) {
       );
 }
 
-function normalizeSingleAlias({ find, replacement, customResolver }: any) {
+/**
+ * 用于处理单个别名配置，规范化其 find 和 replacement 属性，并返回一个新的 Alias 对象
+ * 主要就是去掉末尾的 /
+ * @param param0
+ * @returns
+ * 
+ * @example 
+ * const aliasConfig = {
+    find: "@src/",
+    replacement: "/src/",
+  };
+
+  调用后返回：
+  {
+    find: "@src",
+    replacement: "/src",
+  }
+ */
+function normalizeSingleAlias({
+  find,
+  replacement,
+  customResolver,
+}: Alias): Alias {
+  //检查 find 和 replacement 是否都是以 / 结尾的字符串
   if (
     typeof find === "string" &&
     find[find.length - 1] === "/" &&
     replacement[replacement.length - 1] === "/"
   ) {
+    //如果两者都以 / 结尾，去掉末尾的 /
     find = find.slice(0, find.length - 1);
     replacement = replacement.slice(0, replacement.length - 1);
   }
 
-  const alias: any = {
+  //构建新的 Alias 对象
+  const alias: Alias = {
     find,
     replacement,
   };
