@@ -21,7 +21,7 @@ import {
 } from "./constants";
 import { mergeConfig } from "./publicUtils";
 import { requireResolveFromRootWithFallback } from "./utils";
-import { type TerserOptions, terserPlugin } from "./plugins/terser";
+import { type TerserOptions } from "./plugins/terser";
 
 export interface BuildOptions {
   /**

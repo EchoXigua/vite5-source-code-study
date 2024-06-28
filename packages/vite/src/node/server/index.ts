@@ -8,11 +8,15 @@ export async function _createServer(
   inlineConfig: InlineConfig = {},
   options: { hotListen: boolean }
 ): Promise<ViteDevServer> {
+  //返回一个解析后的配置
   const config = await resolveConfig(inlineConfig, "serve");
 
+  //初始化公共文件，返回一个 Promise 对象 initPublicFilesPromise。
   const initPublicFilesPromise = initPublicFiles(config);
 
   const { root, server: serverConfig } = config;
+
+  //解析 HTTPS 配置
   const httpsOptions = await resolveHttpsConfig(config.server.https);
   const { middlewareMode } = serverConfig;
 

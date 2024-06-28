@@ -10,24 +10,32 @@ import { build } from "esbuild";
 
 import type { RollupOptions } from "rollup";
 import type { Alias, AliasOptions } from "dep-types/alias";
+import aliasPlugin from "@rollup/plugin-alias";
+
+import { withTrailingSlash } from "../shared/utils";
 
 import {
   asyncFlatten,
   createDebugger,
+  createFilter,
   isBuiltin,
   isExternalUrl,
   isFilePathESM,
   isNodeBuiltin,
   isObject,
+  isParentDirectory,
   mergeAlias,
   mergeConfig,
   normalizeAlias,
   normalizePath,
 } from "./utils";
+import { getFsUtils } from "./fsUtils";
+
 import type { HookHandler, Plugin, PluginWithRequiredHook } from "./plugin";
 
 import {
   CLIENT_ENTRY,
+  DEFAULT_ASSETS_RE,
   DEFAULT_CONFIG_FILES,
   ENV_ENTRY,
   FS_PREFIX,
@@ -41,7 +49,12 @@ import { resolveBuildOptions } from "./build";
 import type { LogLevel, Logger } from "./logger";
 import { createLogger } from "./logger";
 
-import { getHookHandler, getSortedPluginsByHook } from "./plugins";
+import {
+  createPluginHookUtils,
+  getHookHandler,
+  getSortedPluginsByHook,
+  resolvePlugins,
+} from "./plugins";
 import type { InternalResolveOptions, ResolveOptions } from "./plugins/resolve";
 import { resolvePlugin, tryNodeResolve } from "./plugins/resolve";
 
@@ -53,6 +66,13 @@ import {
 import type { JsonOptions } from "./plugins/json";
 import type { ESBuildOptions } from "./plugins/esbuild";
 import type { ResolvedServerOptions, ServerOptions } from "./server";
+import { resolveServerOptions } from "./server";
+import { resolvePreviewOptions } from "./preview";
+import type { PreviewOptions, ResolvedPreviewOptions } from "./preview";
+
+import type { PluginContainer } from "./server/pluginContainer";
+import { createPluginContainer } from "./server/pluginContainer";
+
 import type {
   BuildOptions,
   RenderBuiltAssetUrl,
@@ -66,6 +86,7 @@ import type {
 import type { ResolvedSSROptions, SSROptions } from "./ssr";
 import type { PackageCache } from "./packages";
 import { findNearestPackageData } from "./packages";
+import { resolveSSROptions } from "./ssr";
 
 const debug = createDebugger("vite:config");
 const promisifiedRealpath = promisify(fs.realpath);
@@ -665,8 +686,13 @@ export async function resolveConfig(
     resolvedRoot
   );
 
-  // resolve cache directory
+  //用于解析缓存目录的路径
+  //findNearestPackageData 返回最近的 package.json 文件的数据
   const pkgDir = findNearestPackageData(resolvedRoot, packageCache)?.dir;
+
+  //如果用户定了缓存目录则使用用户定义的，查找最近的 package.json 文件所在的目录，
+  //并将缓存目录设为该目录下的 node_modules/.vite
+  //如果没有找到 package.json 文件，则将缓存目录设为 resolvedRoot 下的 .vite。
   const cacheDir = normalizePath(
     config.cacheDir
       ? path.resolve(resolvedRoot, config.cacheDir)
@@ -675,34 +701,50 @@ export async function resolveConfig(
       : path.join(resolvedRoot, `.vite`)
   );
 
+  //创建一个过滤器函数 assetsFilter，该函数用于确定哪些资源应该被包含在内
   const assetsFilter =
     config.assetsInclude &&
     (!Array.isArray(config.assetsInclude) || config.assetsInclude.length)
       ? createFilter(config.assetsInclude)
       : () => false;
 
-  // create an internal resolver to be used in special scenarios, e.g.
-  // optimizer & handling css @imports
+  //定义了一个内部解析器函数 用于在某些特殊场景下使用，例如优化器和处理 CSS @import 语句
   const createResolver: ResolvedConfig["createResolver"] = (options) => {
-    let aliasContainer: anyContainer | undefined;
-    let resolverContainer: anyContainer | undefined;
+    //别名解析器容器
+    let aliasContainer: PluginContainer | undefined;
+    //解析器容器
+    let resolverContainer: PluginContainer | undefined;
+
+    //返回一个异步函数
+    /**
+     * @param id 要解析的模块 ID
+     * @param importer 导入该模块的模块 ID
+     * @param aliasOnly 是否仅使用别名解析
+     * @param ssr 是否为服务器端渲染
+     */
     return async (id, importer, aliasOnly, ssr) => {
-      let container: anyContainer;
+      let container: PluginContainer;
       if (aliasOnly) {
+        //仅使用别名解析
         container =
+          //如果 aliasContainer 已经存在，则使用它。
+          //否则，创建一个新的别名解析器容器，并将其赋值给 aliasContainer。
           aliasContainer ||
-          (aliasContainer = await createanyContainer({
+          (aliasContainer = await createPluginContainer({
             ...resolved,
-            anys: [aliasany({ entries: resolved.resolve.alias })],
+            plugins: [aliasPlugin({ entries: resolved.resolve.alias })],
           }));
       } else {
+        //需要完整的解析器
         container =
+          //如果 resolverContainer 已经存在，则使用它
+          //否则，创建一个新的解析器容器，并将其赋值给 resolverContainer
           resolverContainer ||
-          (resolverContainer = await createanyContainer({
+          (resolverContainer = await createPluginContainer({
             ...resolved,
-            anys: [
-              aliasany({ entries: resolved.resolve.alias }),
-              resolveany({
+            plugins: [
+              aliasPlugin({ entries: resolved.resolve.alias }),
+              resolvePlugin({
                 ...resolved.resolve,
                 root: resolvedRoot,
                 isProduction,
@@ -727,6 +769,7 @@ export async function resolveConfig(
     };
   };
 
+  //用于解析 publicDir 配置项，并将其标准化为绝对路径
   const { publicDir } = config;
   const resolvedPublicDir =
     publicDir !== false && publicDir !== ""
@@ -738,20 +781,27 @@ export async function resolveConfig(
         )
       : "";
 
+  //解析和处理服务器选项和 SSR（服务器端渲染）选项
   const server = resolveServerOptions(resolvedRoot, config.server, logger);
   const ssr = resolveSSROptions(config.ssr, resolveOptions.preserveSymlinks);
 
+  //初始化 optimizeDeps
   const optimizeDeps = config.optimizeDeps || {};
 
+  //初始化 BASE_URL
   const BASE_URL = resolvedBase;
 
-  let resolved: any;
+  let resolved: ResolvedConfig;
 
-  let createUserWorkeranys = config.worker?.anys;
-  if (Array.isArray(createUserWorkeranys)) {
+  //检查和处理 config.worker?.plugins 的兼容性问题
+  //如果是数组，转为一个函数并返回该数组
+  //这段代码的目的是为了兼容旧的配置格式，将数组格式转换为函数格式
+  let createUserWorkerPlugins = config.worker?.plugins;
+  if (Array.isArray(createUserWorkerPlugins)) {
     // @ts-expect-error backward compatibility
-    createUserWorkeranys = () => config.worker?.anys;
+    createUserWorkerPlugins = () => config.worker?.plugins;
 
+    //记录一条警告信息，提示用户 worker.plugins 现在应该是一个返回插件数组的函数，并建议用户更新他们的 Vite 配置
     logger.warn(
       colors.yellow(
         `worker.anys is now a function that returns an array of anys. ` +
@@ -760,27 +810,45 @@ export async function resolveConfig(
     );
   }
 
-  const createWorkeranys = async function (bundleChain: string[]) {
-    // Some anys that aren't intended to work in the bundling of workers (doing post-processing at build time for example).
-    // And anys may also have cached that could be corrupted by being used in these extra rollup calls.
-    // So we need to separate the worker any from the any that vite needs to run.
-    const rawWorkerUseranys = (
-      (await asyncFlatten(createUserWorkeranys?.() || [])) as any[]
-    ).filter(filterany);
+  /**
+   * 定义一个异步函数，用于创建处理 worker 的插件
+   * 这些插件与用于主线程的插件分开处理，以避免在 worker 捆绑过程中出现问题
+   * @param bundleChain 字符串数组，表示捆绑链
+   * @returns
+   */
+  const createWorkerPlugins = async function (bundleChain: string[]) {
+    // 一些插件不适合在 worker 的捆绑过程中使用（例如在构建时进行后处理的插件）。
+    // 而且插件可能已经缓存，在这些额外的 rollup 调用中使用时可能会损坏缓存。
+    // 因此，我们需要将 worker 插件与 Vite 运行所需的插件分开。
 
-    // resolve worker
+    //使用 createUserWorkerPlugins?.() 获取用户定义的 worker 插件数组。
+    //使用 asyncFlatten 展平插件数组，因为插件可能包含异步操作
+    //使用 filterPlugin 过滤插件，移除不适合在 worker 捆绑过程中使用的插件。
+    const rawWorkerUserPlugins = (
+      (await asyncFlatten(createUserWorkerPlugins?.() || [])) as Plugin[]
+    ).filter(filterPlugin);
+
+    // 初始化 worker 配置
     let workerConfig = mergeConfig({}, config);
-    const [workerPreanys, workerNormalanys, workerPostanys] =
-      sortUseranys(rawWorkerUseranys);
 
-    // run config hooks
-    const workerUseranys = [
-      ...workerPreanys,
-      ...workerNormalanys,
-      ...workerPostanys,
+    //对插件进行分类
+    const [workerPrePlugins, workerNormalPlugins, workerPostPlugins] =
+      sortUserPlugins(rawWorkerUserPlugins);
+
+    // 合并分类后的插件
+    const workerUserPlugins = [
+      ...workerPrePlugins,
+      ...workerNormalPlugins,
+      ...workerPostPlugins,
     ];
-    workerConfig = await runConfigHook(workerConfig, workerUseranys, configEnv);
+    //运行配置钩子，将结果赋值给 worker 配置
+    workerConfig = await runConfigHook(
+      workerConfig,
+      workerUserPlugins,
+      configEnv
+    );
 
+    //创建 workerResolved 配置
     const workerResolved: ResolvedConfig = {
       ...workerConfig,
       ...resolved,
@@ -788,50 +856,59 @@ export async function resolveConfig(
       mainConfig: resolved,
       bundleChain,
     };
-    const resolvedWorkeranys = await resolveanys(
+
+    //解析插件
+    const resolvedWorkerPlugins = await resolvePlugins(
       workerResolved,
-      workerPreanys,
-      workerNormalanys,
-      workerPostanys
+      workerPrePlugins,
+      workerNormalPlugins,
+      workerPostPlugins
     );
 
-    // run configResolved hooks
+    //使用 createPluginHookUtils 创建插件钩子工具。
+    //获取并排序 configResolved 钩子，并运行这些钩子
     await Promise.all(
-      createanyHookUtils(resolvedWorkeranys)
-        .getSortedanyHooks("configResolved")
+      createPluginHookUtils(resolvedWorkerPlugins)
+        .getSortedPluginHooks("configResolved")
         .map((hook) => hook(workerResolved))
     );
 
-    return resolvedWorkeranys;
+    //返回解析后的 worker 插件
+    return resolvedWorkerPlugins;
   };
 
   const resolvedWorkerOptions: ResolvedWorkerOptions = {
     format: config.worker?.format || "iife",
-    anys: createWorkeranys,
+    plugins: createWorkerPlugins,
     rollupOptions: config.worker?.rollupOptions || {},
   };
 
+  //解析并设置配置对象 resolved，它最终会包含所有必要的配置信息，以供构建工具使用
   resolved = {
+    // 如果 configFile 存在，则将其路径标准化
     configFile: configFile ? normalizePath(configFile) : undefined,
+    //对 configFileDependencies 中的每个依赖项进行路径解析和标准化
     configFileDependencies: configFileDependencies.map((name) =>
       normalizePath(path.resolve(name))
     ),
-    inlineConfig,
-    root: resolvedRoot,
-    base: withTrailingSlash(resolvedBase),
-    rawBase: resolvedBase,
-    resolve: resolveOptions,
-    publicDir: resolvedPublicDir,
-    cacheDir,
+    inlineConfig, //直接传入的行内配置
+    root: resolvedRoot, //: 解析后的根目录路径
+    base: withTrailingSlash(resolvedBase), //以斜杠结尾的基本路径
+    rawBase: resolvedBase, // 原始基本路径
+    resolve: resolveOptions, //解析选项
+    publicDir: resolvedPublicDir, //解析后的公共目录
+    cacheDir, //缓存目录
     command,
     mode,
     ssr,
     isWorker: false,
-    mainConfig: null,
-    bundleChain: [],
+    mainConfig: null, //主配置，初始为 null
+    bundleChain: [], //捆绑链，初始为空数组。
     isProduction,
-    anys: useranys,
-    css: resolveCSSOptions(config.css),
+    plugins: userPlugins, //用户定义的插件
+    css: resolveCSSOptions(config.css), //解析后的 CSS 选项
+
+    //如果 config.esbuild 为 false，则设置为 false；否则，合并 config.esbuild 和一些默认选项
     esbuild:
       config.esbuild === false
         ? false
@@ -839,10 +916,13 @@ export async function resolveConfig(
             jsxDev: !isProduction,
             ...config.esbuild,
           },
-    server,
-    build: resolvedBuildOptions,
-    preview: resolvePreviewOptions(config.preview, server),
-    envDir,
+    server, //服务器选项
+    build: resolvedBuildOptions, //解析后的构建选项
+    preview: resolvePreviewOptions(config.preview, server), // 解析后的预览选项
+    envDir, //环境变量目录
+
+    // 环境变量，包括基础 URL、模式、开发和生产标志
+    //这里的配置会被注入到 import.meta.env中
     env: {
       ...userEnv,
       BASE_URL,
@@ -850,12 +930,15 @@ export async function resolveConfig(
       DEV: !isProduction,
       PROD: isProduction,
     },
+    //用于判断文件是否包含在资产中的函数
     assetsInclude(file: string) {
       return DEFAULT_ASSETS_RE.test(file) || assetsFilter(file);
     },
     logger,
-    packageCache,
-    createResolver,
+    packageCache, //包缓存
+    createResolver, //解析器创建函数
+
+    //依赖优化选项，包括一些默认设置和 config.optimizeDeps 合并的选项
     optimizeDeps: {
       holdUntilCrawlEnd: true,
       ...optimizeDeps,
@@ -864,56 +947,71 @@ export async function resolveConfig(
         ...optimizeDeps.esbuildOptions,
       },
     },
-    worker: resolvedWorkerOptions,
-    appType: config.appType ?? "spa",
+    worker: resolvedWorkerOptions, //解析后的 worker 选项
+    appType: config.appType ?? "spa", // 应用类型，默认为 "spa"
+
+    //实验性选项，包括一些默认设置和 config.experimental 合并的选项
     experimental: {
       importGlobRestoreExtension: false,
       hmrPartialAccept: false,
       ...config.experimental,
     },
-    getSortedanys: undefined!,
-    getSortedanyHooks: undefined!,
+    //未定义的插件排序函数（占位符）
+    getSortedPlugins: undefined!,
+    //未定义的插件钩子排序函数（占位符）
+    getSortedPluginHooks: undefined!,
   };
+
+  //合并用户配置
   resolved = {
     ...config,
     ...resolved,
   };
-  (resolved.anys as any[]) = await resolveanys(
+  //解析插件
+  (resolved.plugins as Plugin[]) = await resolvePlugins(
     resolved,
-    preanys,
-    normalanys,
-    postanys
+    prePlugins,
+    normalPlugins,
+    postPlugins
   );
-  Object.assign(resolved, createanyHookUtils(resolved.anys));
+  //合并插件钩子工具到 resolved 对象
+  Object.assign(resolved, createPluginHookUtils(resolved.plugins));
 
-  // call configResolved hooks
+  //调用 configResolved 钩子
   await Promise.all(
-    resolved.getSortedanyHooks("configResolved").map((hook) => hook(resolved))
+    resolved
+      .getSortedPluginHooks("configResolved")
+      //用 map 方法遍历这些钩子，并调用每个钩子，将 resolved 配置对象传递给它们。
+      .map((hook) => hook(resolved))
   );
 
+  //处理依赖优化的向后兼容性
+  //处理普通的依赖优化选项
   optimizeDepsDisabledBackwardCompatibility(resolved, resolved.optimizeDeps);
+  //处理 SSR（服务器端渲染）的依赖优化选项
   optimizeDepsDisabledBackwardCompatibility(
     resolved,
     resolved.ssr.optimizeDeps,
     "ssr."
   );
 
+  //将解析后的配置对象及其插件信息输出到调试日志中，方便开发者查看和调试。
   debug?.(`using resolved config: %O`, {
     ...resolved,
-    anys: resolved.anys.map((p) => p.name),
+    plugins: resolved.plugins.map((p) => p.name),
     worker: {
       ...resolved.worker,
-      anys: `() => anys`,
+      plugins: `() => plugins`,
     },
   });
 
-  // validate config
-
+  // 配置验证,这部分代码用于验证构建配置是否合理
   if (
     config.build?.terserOptions &&
     config.build.minify &&
     config.build.minify !== "terser"
   ) {
+    //现在 Vite 默认使用 esbuild 进行代码压缩，如果仍希望使用 Terser，请将 build.minify 设置为 "terser"。
     logger.warn(
       colors.yellow(
         `build.terserOptions is specified but build.minify is not set to use Terser. ` +
@@ -923,20 +1021,23 @@ export async function resolveConfig(
     );
   }
 
-  // Check if all assetFileNames have the same reference.
-  // If not, display a warn for user.
+  //用于检查构建配置中的 assetFileNames 是否具有相同的引用，如果不是，则向用户显示警告信息。
   const outputOption = config.build?.rollupOptions?.output ?? [];
   // Use isArray to narrow its type to array
   if (Array.isArray(outputOption)) {
     const assetFileNamesList = outputOption.map(
       (output) => output.assetFileNames
     );
+
+    //检查是否存在多个不同的引用
     if (assetFileNamesList.length > 1) {
+      //获取第一个输出选项的 `assetFileNames` 值作为参考
       const firstAssetFileNames = assetFileNamesList[0];
       const hasDifferentReference = assetFileNamesList.some(
         (assetFileNames) => assetFileNames !== firstAssetFileNames
       );
       if (hasDifferentReference) {
+        //向用户发出警告，说明 Vite 只支持所有输出选项使用相同的 `assetFileNames` 模式。
         resolved.logger.warn(
           colors.yellow(`
   assetFileNames isn't equal for every build.rollupOptions.output. A single pattern across all outputs is supported by Vite.
@@ -946,7 +1047,7 @@ export async function resolveConfig(
     }
   }
 
-  // Warn about removal of experimental features
+  // 用于检查和警告关于已移除的实验性功能的使用
   if (
     // @ts-expect-error Option removed
     config.legacy?.buildSsrCjsExternalHeuristics ||
@@ -961,6 +1062,8 @@ export async function resolveConfig(
     );
   }
 
+  //用于检查构建输出目录 (build.outDir) 是否与项目根目录 (root) 相同或者是其父目录，
+  //从而可能导致 Vite 在构建过程中覆盖源文件的问题
   const resolvedBuildOutDir = normalizePath(
     path.resolve(resolved.root, resolved.build.outDir)
   );
@@ -1490,5 +1593,47 @@ async function loadConfigFromBundledFile(
 
     // 如果是 ES 模块，则返回默认导出；否则直接返回原始对象
     return raw.__esModule ? raw.default : raw;
+  }
+}
+
+function optimizeDepsDisabledBackwardCompatibility(
+  resolved: ResolvedConfig,
+  optimizeDeps: DepOptimizationConfig,
+  optimizeDepsPath: string = ""
+) {
+  const optimizeDepsDisabled = optimizeDeps.disabled;
+  if (optimizeDepsDisabled !== undefined) {
+    if (optimizeDepsDisabled === true || optimizeDepsDisabled === "dev") {
+      const commonjsOptionsInclude = resolved.build?.commonjsOptions?.include;
+      const commonjsPluginDisabled =
+        Array.isArray(commonjsOptionsInclude) &&
+        commonjsOptionsInclude.length === 0;
+      optimizeDeps.noDiscovery = true;
+      optimizeDeps.include = undefined;
+      if (commonjsPluginDisabled) {
+        resolved.build.commonjsOptions.include = undefined;
+      }
+      resolved.logger.warn(
+        colors.yellow(`(!) Experimental ${optimizeDepsPath}optimizeDeps.disabled and deps pre-bundling during build were removed in Vite 5.1.
+    To disable the deps optimizer, set ${optimizeDepsPath}optimizeDeps.noDiscovery to true and ${optimizeDepsPath}optimizeDeps.include as undefined or empty.
+    Please remove ${optimizeDepsPath}optimizeDeps.disabled from your config.
+    ${
+      commonjsPluginDisabled
+        ? "Empty config.build.commonjsOptions.include will be ignored to support CJS during build. This config should also be removed."
+        : ""
+    }
+  `)
+      );
+    } else if (
+      optimizeDepsDisabled === false ||
+      optimizeDepsDisabled === "build"
+    ) {
+      resolved.logger.warn(
+        colors.yellow(`(!) Experimental ${optimizeDepsPath}optimizeDeps.disabled and deps pre-bundling during build were removed in Vite 5.1.
+    Setting it to ${optimizeDepsDisabled} now has no effect.
+    Please remove ${optimizeDepsPath}optimizeDeps.disabled from your config.
+  `)
+      );
+    }
   }
 }

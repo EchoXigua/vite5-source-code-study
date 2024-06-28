@@ -61,3 +61,51 @@ export const DEFAULT_DEV_PORT = 5173;
 export const DEFAULT_PREVIEW_PORT = 4173;
 
 export const DEFAULT_ASSETS_INLINE_LIMIT = 4096;
+
+//   提醒开发者在编辑 KNOWN_ASSET_TYPES 前需要注意几点：
+//   1. 如果你在 KNOWN_ASSET_TYPES 中添加了一个新的资源类型，确保同时在 TypeScript
+//    声明文件 packages/vite/client.d.ts 中也进行了添加。
+//   2. 如果某个资源的 MIME 类型无法通过 mrmime 查找到，还需要在 packages/vite/src/node/plugin/assets.ts
+//   中的 registerCustomMime 函数中添加相应的 MIME 类型。
+export const KNOWN_ASSET_TYPES = [
+  // images
+  "apng",
+  "png",
+  "jpe?g",
+  "jfif",
+  "pjpeg",
+  "pjp",
+  "gif",
+  "svg",
+  "ico",
+  "webp",
+  "avif",
+
+  // media
+  "mp4",
+  "webm",
+  "ogg",
+  "mp3",
+  "wav",
+  "flac",
+  "aac",
+  "opus",
+  "mov",
+  "m4a",
+  "vtt",
+
+  // fonts
+  "woff2?",
+  "eot",
+  "ttf",
+  "otf",
+
+  // other
+  "webmanifest",
+  "pdf",
+  "txt",
+];
+
+export const DEFAULT_ASSETS_RE = new RegExp(
+  `\\.(` + KNOWN_ASSET_TYPES.join("|") + `)(\\?.*)?$`
+);
