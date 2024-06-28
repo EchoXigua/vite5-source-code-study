@@ -3,6 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import { URL, fileURLToPath } from "node:url";
 import { builtinModules, createRequire } from "node:module";
+import fsp from "node:fs/promises";
+
 import { createFilter as _createFilter } from "@rollup/pluginutils";
 
 import type { Alias, AliasOptions } from "dep-types/alias";
@@ -348,4 +350,37 @@ export function isFilePathESM(
       return false;
     }
   }
+}
+
+//递归读取文件错误
+export const ERR_SYMLINK_IN_RECURSIVE_READDIR =
+  "ERR_SYMLINK_IN_RECURSIVE_READDIR";
+export async function recursiveReaddir(dir: string): Promise<string[]> {
+  if (!fs.existsSync(dir)) {
+    return [];
+  }
+  let dirents: fs.Dirent[];
+  try {
+    dirents = await fsp.readdir(dir, { withFileTypes: true });
+  } catch (e) {
+    if (e.code === "EACCES") {
+      // Ignore permission errors
+      return [];
+    }
+    throw e;
+  }
+  if (dirents.some((dirent) => dirent.isSymbolicLink())) {
+    const err: any = new Error(
+      "Symbolic links are not supported in recursiveReaddir"
+    );
+    err.code = ERR_SYMLINK_IN_RECURSIVE_READDIR;
+    throw err;
+  }
+  const files = await Promise.all(
+    dirents.map((dirent) => {
+      const res = path.resolve(dir, dirent.name);
+      return dirent.isDirectory() ? recursiveReaddir(res) : normalizePath(res);
+    })
+  );
+  return files.flat(1);
 }

@@ -1,6 +1,21 @@
 import { isDepsOptimizerEnabled, resolveConfig } from "../config";
 import type { InlineConfig, ResolvedConfig } from "../config";
 
+import { initPublicFiles } from "../publicDir";
+import {
+  httpServerStart,
+  resolveHttpServer,
+  resolveHttpsConfig,
+  setClientErrorHandler,
+} from "../http";
+
+import {
+  createNoopWatcher,
+  getResolvedOutDirs,
+  resolveChokidarOptions,
+  resolveEmptyOutDir,
+} from "../watch";
+
 export function createServer(inlineConfig = {}) {
   return _createServer(inlineConfig, { hotListen: true });
 }
@@ -20,11 +35,13 @@ export async function _createServer(
   const httpsOptions = await resolveHttpsConfig(config.server.https);
   const { middlewareMode } = serverConfig;
 
+  //解析输出目录
   const resolvedOutDirs = getResolvedOutDirs(
     config.root,
     config.build.outDir,
     config.build.rollupOptions?.output
   );
+  //解析输出目录是否应该被清空
   const emptyOutDir = resolveEmptyOutDir(
     config.build.emptyOutDir,
     config.root,
