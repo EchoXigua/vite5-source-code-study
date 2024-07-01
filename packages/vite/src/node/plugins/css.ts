@@ -1,5 +1,6 @@
 import type * as PostCSS from "postcss";
 import type { LightningCSSOptions } from "dep-types/lightningcss";
+import { CSS_LANGS_RE } from "../constants";
 
 //用于配置 Vite 中与 CSS 相关的选项，涵盖了各种 CSS 处理方式，包括 CSS 模块、预处理器和源映射等。
 export interface CSSOptions {
@@ -125,3 +126,8 @@ export interface CSSModulesOptions {
         inputFile: string
       ) => string);
 }
+
+const directRequestRE = /[?&]direct\b/;
+
+export const isDirectCSSRequest = (request: string): boolean =>
+  CSS_LANGS_RE.test(request) && directRequestRE.test(request);

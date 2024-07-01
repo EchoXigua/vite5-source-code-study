@@ -42,6 +42,13 @@ export const DEFAULT_CONFIG_FILES = [
   "vite.config.cts",
 ];
 
+//js 类型
+export const JS_TYPES_RE = /\.(?:j|t)sx?$|\.mjs$/;
+
+//css 类型
+export const CSS_LANGS_RE =
+  /\.(css|less|sass|scss|styl|stylus|pcss|postcss|sss)(?:$|\?)/;
+
 export const VITE_PACKAGE_DIR = resolve(
   // import.meta.url is `dist/node/constants.js` after bundle
   fileURLToPath(import.meta.url),

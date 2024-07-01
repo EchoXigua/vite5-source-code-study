@@ -136,7 +136,9 @@ export async function _createServer(
     container.resolveId(url, undefined, { ssr })
   );
 
+  //创建插件容器
   const container = await createPluginContainer(config, moduleGraph, watcher);
+  //关闭 HTTP 服务器的函数
   const closeHttpServer = createServerCloseFn(httpServer);
 
   let exitProcess: () => void;

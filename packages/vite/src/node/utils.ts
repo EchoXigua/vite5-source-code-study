@@ -384,3 +384,35 @@ export async function recursiveReaddir(dir: string): Promise<string[]> {
   );
   return files.flat(1);
 }
+
+/**
+ * 用于匹配 URL 中的 import 查询参数部分
+ * (\?|&)：匹配问号 ? 或者 &，表示查询参数的起始位置
+ * import=?：匹配 import，后面可以有一个等号 =
+ * (?:&|$)：非捕获分组，表示后面跟着 & 或者字符串的结尾 $
+ */
+const importQueryRE = /(\?|&)import=?(?:&|$)/;
+
+//用来匹配 URL 中结尾的分隔符
+///[?&]$/：匹配最后一个字符是 ? 或 & 的位置
+//用于确保在移除 import 查询参数后，URL 的结尾没有多余的分隔符。
+const trailingSeparatorRE = /[?&]$/;
+
+//用于移除 URL 中的 import 查询参数以及可能的结尾分隔符（? 或 &）。
+export function removeImportQuery(url: string): string {
+  //$1 在 replace 方法中用于替换，表示保留匹配到的第一个捕获组（即 (\?|&)），移除 import 查询参数部分。
+  return url.replace(importQueryRE, "$1").replace(trailingSeparatorRE, "");
+}
+
+/**
+ * 用于匹配 URL 中的时间戳查询参数
+ * \bt=：匹配 t=，确保 t 是一个单词边界（即其前面是非单词字符，后面是单词字符）。
+ * \d{13}：匹配 13 位数字，即时间戳的长度
+ * &?：匹配可选的 & 符号
+ * \b：确保匹配到的部分是一个单词边界，避免匹配到更长的字符串。
+ */
+const timestampRE = /\bt=\d{13}&?\b/;
+//用于移除 URL 中时间戳查询参数的函数
+export function removeTimestampQuery(url: string): string {
+  return url.replace(timestampRE, "").replace(trailingSeparatorRE, "");
+}
