@@ -1,5 +1,24 @@
+import type * as http from "node:http";
+import type { Http2SecureServer } from "node:http2";
+import connect from "connect";
+import chokidar from "chokidar";
+
+import type { Connect } from "dep-types/connect";
+import type { FSWatcher, WatchOptions } from "dep-types/chokidar";
+
+import { createWebSocketServer } from "./ws";
+import { getEnvFilesForMode } from "../env";
+
 import { isDepsOptimizerEnabled, resolveConfig } from "../config";
 import type { InlineConfig, ResolvedConfig } from "../config";
+
+import {
+  createHMRBroadcaster,
+  createServerHMRChannel,
+  getShortName,
+  handleHMRUpdate,
+  updateModules,
+} from "./hmr";
 
 import { initPublicFiles } from "../publicDir";
 import {
@@ -15,6 +34,11 @@ import {
   resolveChokidarOptions,
   resolveEmptyOutDir,
 } from "../watch";
+
+import { ModuleGraph } from "./moduleGraph";
+import type { ModuleNode } from "./moduleGraph";
+
+export type HttpServer = http.Server | Http2SecureServer;
 
 export function createServer(inlineConfig = {}) {
   return _createServer(inlineConfig, { hotListen: true });
@@ -62,37 +86,51 @@ export async function _createServer(
     ? null
     : await resolveHttpServer(serverConfig, middlewares, httpsOptions);
 
+  //返回一个 WebSocket 服务器，用于处理客户端的连接和消息。
   const ws = createWebSocketServer(httpServer, config, httpsOptions);
+  // 返回一个 HMR 广播器对象
   const hot = createHMRBroadcaster()
+    //将之前创建的 ws WebSocket 服务器对象作为一个频道添加到 HMR 广播器中
     .addChannel(ws)
+    //将另一个频道 createServerHMRChannel() 添加到 HMR 广播器中
     .addChannel(createServerHMRChannel());
   if (typeof config.server.hmr === "object" && config.server.hmr.channels) {
+    //检查 config 中是否有 server.hmr 属性，并且它是一个对象且包含 channels 属性
+
+    //遍历 config.server.hmr.channels 数组，将每个通道对象通过 hot.addChannel(channel) 添加到 HMR 广播器中
     config.server.hmr.channels.forEach((channel) => hot.addChannel(channel));
   }
 
+  //初始化公共文件
   const publicFiles = await initPublicFilesPromise;
   const { publicDir } = config;
 
   if (httpServer) {
+    //设置客户端错误处理程序，通常用于捕获和处理客户端请求中的错误信息。
     setClientErrorHandler(httpServer, config.logger);
   }
 
   // eslint-disable-next-line eqeqeq
+  //根据 serverConfig.watch 的值来决定是否启用文件监视器，并创建相应的监视器对象
   const watchEnabled = serverConfig.watch !== null;
   const watcher = watchEnabled
     ? (chokidar.watch(
-        // config file dependencies and env file might be outside of root
+        //创建一个 chokidar 的文件监视器对象
+        // 配置文件依赖项和env文件可能在根目录之外
         [
+          //数组中包含了需要监视的路径：
+          //根目录 、配置文件依赖、环境文件、公共文件目录（如果存在）
           root,
           ...config.configFileDependencies,
           ...getEnvFilesForMode(config.mode, config.envDir),
-          // Watch the public directory explicitly because it might be outside
-          // of the root directory.
+          //显式地监视公共目录，因为它可能位于根目录之外。
           ...(publicDir && publicFiles ? [publicDir] : []),
         ],
         resolvedWatchOptions
       ) as FSWatcher)
-    : createNoopWatcher(resolvedWatchOptions);
+    : //createNoopWatcher 是一个函数，用于创建一个空的监视器对象或者一个不执行任何操作的监视器对象
+      //根据 resolvedWatchOptions 的设置来决定其行为。
+      createNoopWatcher(resolvedWatchOptions);
 
   const moduleGraph: ModuleGraph = new ModuleGraph((url, ssr) =>
     container.resolveId(url, undefined, { ssr })

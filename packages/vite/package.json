@@ -30,6 +30,7 @@
     "@types/pnpapi": "^0.0.5",
     "cac": "^6.7.14",
     "chokidar": "^3.6.0",
+    "connect": "^3.7.0",
     "dep-types": "link:./src/types",
     "dotenv": "^16.4.5",
     "dotenv-expand": "^11.0.6",
