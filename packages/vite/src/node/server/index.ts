@@ -7,18 +7,19 @@ import type * as http from "node:http";
 
 import connect from "connect";
 import chokidar from "chokidar";
+import colors from "picocolors";
+import corsMiddleware from "cors";
 import type { SourceMap } from "rollup";
 import picomatch from "picomatch";
 import type { Matcher } from "picomatch";
 import type { Connect } from "dep-types/connect";
 import type { FSWatcher, WatchOptions } from "dep-types/chokidar";
+import launchEditorMiddleware from "launch-editor-middleware";
 
 import { createWebSocketServer } from "./ws";
 import { getEnvFilesForMode } from "../env";
-
 import { isDepsOptimizerEnabled, resolveConfig } from "../config";
 import type { InlineConfig, ResolvedConfig } from "../config";
-
 import {
   createHMRBroadcaster,
   createServerHMRChannel,
@@ -26,7 +27,6 @@ import {
   handleHMRUpdate,
   updateModules,
 } from "./hmr";
-
 import { initPublicFiles } from "../publicDir";
 import {
   httpServerStart,
@@ -34,13 +34,13 @@ import {
   resolveHttpsConfig,
   setClientErrorHandler,
 } from "../http";
-
 import {
   createNoopWatcher,
   getResolvedOutDirs,
   resolveChokidarOptions,
   resolveEmptyOutDir,
 } from "../watch";
+import { CLIENT_DIR, DEFAULT_DEV_PORT } from "../constants";
 import {
   diffDnsOrderChange,
   isInNodeModules,
@@ -67,6 +67,31 @@ import { getDepsOptimizer, initDepsOptimizer } from "../optimizer";
 import { printServerUrls } from "../logger";
 import { bindCLIShortcuts } from "../shortcuts";
 import type { BindCLIShortcutsOptions } from "../shortcuts";
+import { getFsUtils } from "../fsUtils";
+
+//中间件的处理
+import { errorMiddleware, prepareError } from "./middlewares/error";
+import { timeMiddleware } from "./middlewares/time";
+import {
+  cachedTransformMiddleware,
+  transformMiddleware,
+} from "./middlewares/transform";
+import { proxyMiddleware } from "./middlewares/proxy";
+import { baseMiddleware } from "./middlewares/base";
+import {
+  servePublicMiddleware,
+  serveRawFsMiddleware,
+  serveStaticMiddleware,
+} from "./middlewares/static";
+import { htmlFallbackMiddleware } from "./middlewares/htmlFallback";
+import {
+  createDevHtmlTransformFn,
+  indexHtmlMiddleware,
+} from "./middlewares/indexHtml";
+import { notFoundMiddleware } from "./middlewares/notFound";
+
+//文件预热
+import { warmupFiles } from "./warmup";
 
 export type HttpServer = http.Server | Http2SecureServer;
 
@@ -652,39 +677,57 @@ export async function _createServer(
     _shortcutsOptions: undefined,
   };
 
-  // maintain consistency with the server instance after restarting.
+  //用于在服务器重启后维持与原始服务器实例 server 的一致性
+  //即使在代理对象 reflexServer 上进行操作，
+  //所有的属性访问和修改都会直接作用于原始的 server 实例
   const reflexServer = new Proxy(server, {
     get: (_, property: keyof ViteDevServer) => {
+      //当通过 reflexServer 访问属性时，实际上是在访问 server 对象的相应属性。
       return server[property];
     },
     set: (_, property: keyof ViteDevServer, value: never) => {
+      //当通过 reflexServer 设置属性时，会将值赋给 server 对象的相应属性，并返回 true 表示设置成功。
       server[property] = value;
       return true;
     },
   });
 
+  //是在非中间件模式下，设置一个退出处理函数 exitProcess，
+  //用来处理进程的终止信号（SIGTERM）和标准输入流结束事件（end）。
   if (!middlewareMode) {
     exitProcess = async () => {
       try {
+        //关闭服务器
         await server.close();
       } finally {
+        //终止当前 Node.js 进程
         process.exit();
       }
     };
+    //注册对 SIGTERM 信号的处理
+    //一旦接收到 SIGTERM 信号，就会执行 exitProcess 函数，关闭服务器并终止进程
     process.once("SIGTERM", exitProcess);
     if (process.env.CI !== "true") {
+      //如果当前环境不是 CI 环境（即 process.env.CI !== "true"），
+      //则使用 process.stdin.on("end", exitProcess) 注册对标准输入流结束事件的处理。
+      //当标准输入流结束时，也会执行 exitProcess 函数，关闭服务器并终止进程。
       process.stdin.on("end", exitProcess);
     }
   }
 
+  //用于处理模块热更新
   const onHMRUpdate = async (
     type: "create" | "delete" | "update",
-    file: string
+    file: string //表示发生变更的文件路径或标识
   ) => {
     if (serverConfig.hmr !== false) {
+      //检查是否在配置中禁用了 HMR
+      //只有当 serverConfig.hmr 不等于 false 时才会继续执行后续操作。
       try {
+        //处理具体的 HMR 更新操作
         await handleHMRUpdate(type, file, server);
       } catch (err) {
+        //发送错误热更新广播器
         hot.send({
           type: "error",
           err: prepareError(err),
@@ -693,103 +736,150 @@ export async function _createServer(
     }
   };
 
+  /**
+   * 主要用于监控文件的添加和删除事件，确保文件变更时能够及时通知相关的处理逻辑，
+   * 如容器的变更监控、公共文件管理以及模块热更新等。
+   * @param file
+   * @param isUnlink
+   */
   const onFileAddUnlink = async (file: string, isUnlink: boolean) => {
+    //路径标准化
     file = normalizePath(file);
+    //调用容器方法，watchChange 方法，告知文件变更事件的类型（删除或创建）。
     await container.watchChange(file, {
       event: isUnlink ? "delete" : "create",
     });
 
+    //处理公共目录文件
     if (publicDir && publicFiles) {
       if (file.startsWith(publicDir)) {
+        //如果 file 路径以 publicDir 开头，表示是公共目录中的文件
         const path = file.slice(publicDir.length);
+        //根据 isUnlink 决定是删除还是添加文件到 publicFiles
         publicFiles[isUnlink ? "delete" : "add"](path);
         if (!isUnlink) {
+          //如果是添加文件，检查是否存在具有相同路径的模块，并清除其在 moduleGraph.etagToModuleMap 中的记录
+          //以确保下次请求优先使用公共文件而不是模块。
           const moduleWithSamePath = await moduleGraph.getModuleByUrl(path);
           const etag = moduleWithSamePath?.transformResult?.etag;
           if (etag) {
-            // The public file should win on the next request over a module with the
-            // same path. Prevent the transform etag fast path from serving the module
+            //在下一次请求时，公共文件应该优于具有相同路径的模块。防止transform etag快速路径服务于模块
             moduleGraph.etagToModuleMap.delete(etag);
           }
         }
       }
     }
+
+    //如果是文件删除操作，调用 moduleGraph 的 onFileDelete 方法处理文件删除。
     if (isUnlink) moduleGraph.onFileDelete(file);
+    //触发模块热更新
     await onHMRUpdate(isUnlink ? "delete" : "create", file);
   };
 
+  //监听文件变更事件 (change 事件)，并对文件的更新操作进行处理
   watcher.on("change", async (file) => {
+    // 路径标准化
     file = normalizePath(file);
+    //通知容器文件 file 发生了更新事件
     await container.watchChange(file, { event: "update" });
-    // invalidate module graph cache on file change
+
+    //模块图缓存失效：
+    //调用 moduleGraph 的 onFileChange 方法，使与文件相关的模块图缓存失效，以便后续重新加载或处理。
     moduleGraph.onFileChange(file);
+    //调用 onHMRUpdate 函数，触发模块热更新事件，传入操作类型为
     await onHMRUpdate("update", file);
   });
 
   getFsUtils(config).initWatcher?.(watcher);
 
+  //监听文件的添加
   watcher.on("add", (file) => {
     onFileAddUnlink(file, false);
   });
+  //监听文件的删除
   watcher.on("unlink", (file) => {
     onFileAddUnlink(file, true);
   });
 
+  // 监听了 hot 对象的 vite:invalidate 事件，Vite 中用于模块热更新（HMR）的事件
+  // 该事件表示需要无效化某个模块，以便进行模块热更新
   hot.on("vite:invalidate", async ({ path, message }) => {
+    // 从模块图中获取对应路径的模块对象
     const mod = moduleGraph.urlToModuleMap.get(path);
     if (
-      mod &&
-      mod.isSelfAccepting &&
-      mod.lastHMRTimestamp > 0 &&
-      !mod.lastHMRInvalidationReceived
+      mod && //模块存在
+      mod.isSelfAccepting && // 模块可以接受自身更新
+      mod.lastHMRTimestamp > 0 && // 存在上次的 HMR 时间戳
+      !mod.lastHMRInvalidationReceived // 上次 HMR 无效化未接收
     ) {
+      // 标记模块的上次 HMR 无效化已接收
       mod.lastHMRInvalidationReceived = true;
+
+      // 记录日志信息
       config.logger.info(
         colors.yellow(`hmr invalidate `) +
           colors.dim(path) +
           (message ? ` ${message}` : ""),
         { timestamp: true }
       );
+
+      // 获取模块文件的简短名称
       const file = getShortName(mod.file!, config.root);
+
+      // 更新依赖该模块的模块
       updateModules(
         file,
         [...mod.importers],
         mod.lastHMRTimestamp,
         server,
-        true
+        true // 标记为模块的强制更新
       );
     }
   });
 
+  //确保在非中间件模式下（即独立运行模式）
   if (!middlewareMode && httpServer) {
+    //当 HTTP 服务器开始监听时，更新服务器配置中的端口号。
     httpServer.once("listening", () => {
-      // update actual port since this may be different from initial value
       serverConfig.port = (httpServer.address() as net.AddressInfo).port;
     });
   }
 
-  // apply server configuration hooks from plugins
+  // 应用插件的服务器配置钩子
+  // 存储执行后的钩子结果。
   const postHooks: ((() => void) | void)[] = [];
   for (const hook of config.getSortedPluginHooks("configureServer")) {
+    //钩子是按顺序排序的，确保它们按照预定的顺序执行
+    //每个钩子都是一个异步函数，调用时将 reflexServer 传递给它
+    //并将其执行结果（void 或 () => void）存储到 postHooks 数组中
     postHooks.push(await hook(reflexServer));
   }
 
   // Internal middlewares ------------------------------------------------------
 
-  // request timer
+  //定义了 Vite 开发服务器的一些内部中间件
+
+  // 请求计时中间件
   if (process.env.DEBUG) {
+    //仅当环境变量 DEBUG 设置时启用
+
+    //使用 middlewares.use 方法，将 timeMiddleware 添加到中间件栈中。
+    //timeMiddleware 接受 root 目录作为参数，
+    //负责记录请求的开始时间和结束时间，从而计算请求处理所需的时间。
     middlewares.use(timeMiddleware(root));
   }
 
-  // cors (enabled by default)
+  // 处理跨域资源共享（CORS），使服务器能够处理跨域请求。
+  // 默认情况下启用，除非 serverConfig.cors 显式设置为 false。
   const { cors } = serverConfig;
   if (cors !== false) {
     middlewares.use(corsMiddleware(typeof cors === "boolean" ? {} : cors));
   }
 
+  //缓存转换中间件，处理缓存的转换，以提高性能
   middlewares.use(cachedTransformMiddleware(server));
 
-  // proxy
+  // 配置代理
   const { proxy } = serverConfig;
   if (proxy) {
     const middlewareServer =
@@ -797,50 +887,59 @@ export async function _createServer(
     middlewares.use(proxyMiddleware(middlewareServer, proxy, config));
   }
 
-  // base
+  // 基础路径
   if (config.base !== "/") {
+    // 只有在 config.base 不是默认值 / 时才会启用基础路径中间件
     middlewares.use(baseMiddleware(config.rawBase, !!middlewareMode));
   }
 
-  // open in editor support
+  // 打开编辑器支持中间件
+  /**
+   * 当客户端向 "/__open-in-editor" 发送请求时，该中间件会处理请求，并启动配置好的编辑器以打开指定文件
+   * 这个功能常用于在开发工具中点击某个文件路径时直接在编辑器中打开相应文件，提高开发效率
+   */
   middlewares.use("/__open-in-editor", launchEditorMiddleware());
 
-  // ping request handler
-  // Keep the named function. The name is visible in debug logs via `DEBUG=connect:dispatcher ...`
+  //HMR Ping 请求处理中间件，以便在开发环境中保持连接的活跃性
+  //保留命名函数。这个名字可以通过“debug =connect:dispatcher…”在调试日志中看到。
   middlewares.use(function viteHMRPingMiddleware(req, res, next) {
     if (req.headers["accept"] === "text/x-vite-ping") {
+      //检查请求头中的 "accept"
+
+      //返回 HTTP 状态码 204 No Content，表示成功但无内容。这确保了客户端与服务器的连接保持活跃
       res.writeHead(204).end();
     } else {
+      //不是，调用 next() 将请求传递给下一个中间件
       next();
     }
   });
 
-  // serve static files under /public
-  // this applies before the transform middleware so that these files are served
-  // as-is without transforms.
+  // 在 /public 目录下提供静态文件服务
+  // 这适用于转换中间件之前，这样这些文件就可以按原样提供而不需要转换。
   if (publicDir) {
     middlewares.use(servePublicMiddleware(server, publicFiles));
   }
 
-  // main transform middleware
+  // 主要的文件转换中间件
   middlewares.use(transformMiddleware(server));
 
-  // serve static files
+  // 提供静态文件服务
   middlewares.use(serveRawFsMiddleware(server));
   middlewares.use(serveStaticMiddleware(server));
 
-  // html fallback
+  // html 回退，为单页应用（SPA）或多页应用（MPA）提供 HTML 回退功能
   if (config.appType === "spa" || config.appType === "mpa") {
     middlewares.use(
       htmlFallbackMiddleware(root, config.appType === "spa", getFsUtils(config))
     );
   }
 
-  // run post config hooks
-  // This is applied before the html middleware so that user middleware can
-  // serve custom content instead of index.html.
+  /**
+   * 在 HTML 中间件之前运行用户定义的钩子函数，以便用户可以提供自定义内容而不是 index.html。
+   */
   postHooks.forEach((fn) => fn && fn());
 
+  //对于单页应用（SPA）或多页应用（MPA），提供 index.html 的转换和 404 错误处理。
   if (config.appType === "spa" || config.appType === "mpa") {
     // transform index.html
     middlewares.use(indexHtmlMiddleware(root, server));
@@ -849,91 +948,163 @@ export async function _createServer(
     middlewares.use(notFoundMiddleware());
   }
 
-  // error handler
+  // 处理服务器中的一般错误，该中间件可以在请求处理过程中捕获到的任何错误，并进行适当的处理和记录
   middlewares.use(errorMiddleware(server, !!middlewareMode));
 
   // httpServer.listen can be called multiple times
   // when port when using next port number
   // this code is to avoid calling buildStart multiple times
+  /**
+   * 为什么需要 initServer 函数？
+   * 1. 在某些情况下，httpServer.listen 可能会被多次调用。
+   *    比如在尝试不同端口号启动服务器时，可能会尝试多个端口，直到找到一个可用的端口。
+   * 2. 当使用下一个端口号时，可能会多次调用 httpServer.listen。
+   *    例如，如果默认端口被占用，服务器会尝试使用下一个可用的端口
+   * 3. 这段代码的目的是为了避免多次调用 buildStart 方法。
+   *    buildStart 方法可能涉及到耗时的初始化过程，如果多次调用会导致性能问题或其他不可预见的问题。
+   */
+
+  //用于存储初始化过程的 Promise，以确保同一时间只有一个初始化过程在进行
   let initingServer: Promise<void> | undefined;
-  let serverInited = false;
+  let serverInited = false; //用于标记服务器是否已经初始化完成
+
+  /**
+   * 用于初始化服务器。
+   * 目的是为了确保在服务器启动时，一些关键的初始化步骤只执行一次，
+   * 即使 httpServer.listen 被多次调用。这是为了避免重复执行 buildStart 以及其他初始化逻辑
+   *
+   * @returns
+   */
   const initServer = async () => {
+    //检查服务器是否已经初始化
     if (serverInited) return;
+    //检查是否有正在进行的初始化过程
     if (initingServer) return initingServer;
 
+    //开始初始化过程
     initingServer = (async function () {
+      // 调用 buildStart 钩子函数，开始构建过程
       await container.buildStart({});
-      // start deps optimizer after all container plugins are ready
+      // 在所有容器插件准备好后启动深度优化器
       if (isDepsOptimizerEnabled(config, false)) {
+        //如果启用了依赖优化器，则初始化依赖优化器
         await initDepsOptimizer(config, server);
       }
+
+      //调用 warmupFiles 函数，对一些文件进行预热，以提高性能
       warmupFiles(server);
+
+      //初始化完成后，重置 initingServer 以允许将来的重新初始化
       initingServer = undefined;
+      //设置 serverInited 为 true，表示服务器已经初始化完成
       serverInited = true;
     })();
     return initingServer;
   };
 
+  //下面代码的主要目的是在启动 HTTP 服务器前确保初始化某些必要的组件或优化器。
+  //它覆盖了 httpServer.listen 方法，在实际启动服务器之前执行一些初始化操作
   if (!middlewareMode && httpServer) {
-    // overwrite listen to init optimizer before server start
+    // 确保不是中间件模式且存在 httpServer 实例。
+    // 将原始的 httpServer.listen 方法绑定到 listen 变量上，以便稍后调用。
     const listen = httpServer.listen.bind(httpServer);
+
+    // 覆盖 httpServer.listen 方法，在实际调用原始 listen 方法之前，先执行一些初始化操作。
     httpServer.listen = (async (port: number, ...args: any[]) => {
       try {
-        // ensure ws server started
+        //确保 WebSocket 服务器启动
         hot.listen();
+        //initServer 确保某些组件或优化器在服务器启动前已经初始化
         await initServer();
       } catch (e) {
+        //捕获错误并发出 error 事件
         httpServer.emit("error", e);
         return;
       }
+      //调用原始的 listen 方法：
       return listen(port, ...args);
     }) as any;
   } else {
+    //处理中间件模式或没有 httpServer 的清空
     if (options.hotListen) {
+      //options.hotListen 为 true，则启动 WebSocket 服务器
       hot.listen();
     }
+    //调用 initServer 进行初始化
     await initServer();
   }
 
   return server;
 }
 
+/**
+ * 于启动 Vite 开发服务器。
+ * 它接收一个 ViteDevServer 实例和一个可选的端口号 inlinePort，并在特定条件下启动 HTTP 服务器
+ *
+ * @param server
+ * @param inlinePort
+ */
 async function startServer(
   server: ViteDevServer,
   inlinePort?: number
 ): Promise<void> {
   const httpServer = server.httpServer;
   if (!httpServer) {
+    //不能在中间件模式下调用 server.listen。
     throw new Error("Cannot call server.listen in middleware mode.");
   }
 
+  //获取服务器配置选项。
   const options = server.config.server;
+  //解析主机名
   const hostname = await resolveHostname(options.host);
+  //确定端口，优先使用 inlinePort，否则使用配置中的端口
   const configPort = inlinePort ?? options.port;
-  // When using non strict port for the dev server, the running port can be different from the config one.
-  // When restarting, the original port may be available but to avoid a switch of URL for the running
-  // browser tabs, we enforce the previously used port, expect if the config port changed.
+
+  /**
+   * 1. 非严格端口模式：在开发服务器的配置中，可以选择是否启用严格端口模式。
+   *    非严格端口模式下，开发服务器可以使用操作系统提供的可用端口，而不仅限于配置中指定的端口。
+   * 2. 端口可能不一致：在重新启动服务器时，如果之前使用的端口仍然可用，开发服务器可能会选择重新使用该端口。
+   *    这种情况下，服务器当前运行的端口可能会与配置中指定的端口不同。
+   * 3. 避免浏览器标签页切换：为了避免正在运行的浏览器标签页因为端口变化而刷新或重新加载，
+   *    开发服务器会尽量保持之前使用的端口不变，除非配置中显式地更改了端口设置。
+   *
+   * 这样的设计能够确保开发过程中，开发服务器的端口变化对开发者在浏览器中打开的标签页造成的干扰最小化，
+   * 提升开发体验的连续性和稳定性
+   */
+
+  //如果配置的端口为空或者等于服务器配置的端口，使用当前服务器端口
+  //否则使用 configPort，如果都没有，则使用默认端口 DEFAULT_DEV_PORT
   const port =
     (!configPort || configPort === server._configServerPort
       ? server._currentServerPort
       : configPort) ?? DEFAULT_DEV_PORT;
+
+  // 更新服务器的配置端口
   server._configServerPort = configPort;
 
+  // 启动 HTTP 服务器
   const serverPort = await httpServerStart(httpServer, {
     port,
     strictPort: options.strictPort,
     host: hostname.host,
     logger: server.config.logger,
   });
+  // 更新服务器当前端口
   server._currentServerPort = serverPort;
 }
 
+//重新启动 Vite 开发服务器的逻辑
 async function restartServer(server: ViteDevServer) {
+  //全局计时器重置，用于记录重新启动服务器的时间戳，以便后续性能分析或日志记录
   global.__vite_start_time = performance.now();
   const shortcutsOptions = server._shortcutsOptions;
 
   let inlineConfig = server.config.inlineConfig;
+
+  //在重新启动时设置了 _forceOptimizeOnRestart 标志
   if (server._forceOptimizeOnRestart) {
+    //会将 inlineConfig 中的 optimizeDeps 配置项强制设置为 force: true，以便强制重新优化依赖。
     inlineConfig = mergeConfig(inlineConfig, {
       optimizeDeps: {
         force: true,
@@ -947,11 +1118,13 @@ async function restartServer(server: ViteDevServer) {
   // server instance and set the user instance to be used in the new server.
   // This allows us to keep the same server instance for the user.
   {
+    //创建新服务器实例
     let newServer = null;
     try {
-      // delay ws server listen
+      //使用新的配置 inlineConfig 创建一个新的 Vite 服务器实例
       newServer = await _createServer(inlineConfig, { hotListen: false });
     } catch (err: any) {
+      //如果创建过程中出现错误，会捕获并记录错误信息，然后退出函数。
       server.config.logger.error(err.message, {
         timestamp: true,
       });
@@ -959,20 +1132,23 @@ async function restartServer(server: ViteDevServer) {
       return;
     }
 
+    //关闭旧服务器实例
     await server.close();
 
-    // Assign new server props to existing server instance
+    //更新服务器实例属性
     const middlewares = server.middlewares;
     newServer._configServerPort = server._configServerPort;
     newServer._currentServerPort = server._currentServerPort;
+
+    //将新创建的服务器实例 newServer 的属性复制到旧的服务器实例 server 中，保持用户引用的一致性。
     Object.assign(server, newServer);
 
-    // Keep the same connect instance so app.use(vite.middlewares) works
-    // after a restart in middlewareMode (.route is always '/')
+    //重新绑定中间件，新服务器实例的中间件栈复制回旧服务器实例，以保持现有的中间件配置
+    //保持相同的连接实例，以便app.use(vite.middleware)在middlewareMode (. middleware)重启后工作。路由总是'/')
     middlewares.stack = newServer.middlewares.stack;
     server.middlewares = middlewares;
 
-    // Rebind internal server variable so functions reference the user server
+    //将新服务器实例的内部服务器变量绑定回旧服务器实例，以确保所有函数引用正确的用户服务器。
     newServer._setInternalServer(server);
   }
 
@@ -980,40 +1156,57 @@ async function restartServer(server: ViteDevServer) {
     logger,
     server: { port, middlewareMode },
   } = server.config;
+
   if (!middlewareMode) {
+    //如果不是中间件模式，重新启动服务器并监听指定的端口 port；
     await server.listen(port, true);
   } else {
+    //如果是中间件模式，则重新启动热更新服务器。
     server.hot.listen();
   }
+
+  //记录服务器重新启动的信息日志
   logger.info("server restarted.", { timestamp: true });
 
+  //重新绑定 CLI 快捷方式选项
   if (shortcutsOptions) {
+    //如果存在 CLI 快捷方式选项，则禁用打印，并重新绑定服务器的 CLI 快捷方式。
     shortcutsOptions.print = false;
     bindCLIShortcuts(server, shortcutsOptions);
   }
+
+  //这段代码通过创建新的服务器实例并在关闭旧实例后进行属性复制，实现了服务器的平滑重启过程，
+  //以确保在开发过程中，服务器重新启动时不中断现有的开发流程和连接
 }
 
+//用于创建关闭服务器的函数
 export function createServerCloseFn(
   server: HttpServer | null
 ): () => Promise<void> {
   if (!server) {
+    //如果传入的 server 是 null，则返回一个立即 resolved 的 Promise，什么都不做。
     return () => Promise.resolve();
   }
 
   let hasListened = false;
+  //用于存储当前打开的 net.Socket 连接
   const openSockets = new Set<net.Socket>();
 
   server.on("connection", (socket) => {
+    //当服务器接收到新的连接时，将其添加到 openSockets 中，
+    //并监听连接的关闭事件，在连接关闭时从集合中删除该 socket
     openSockets.add(socket);
     socket.on("close", () => {
       openSockets.delete(socket);
     });
   });
 
+  //当服务器首次开始侦听时，设置 hasListened 标志为 true。
   server.once("listening", () => {
     hasListened = true;
   });
 
+  //返回关闭服务器的函数
   return () =>
     new Promise<void>((resolve, reject) => {
       openSockets.forEach((s) => s.destroy());
@@ -1031,14 +1224,33 @@ export function createServerCloseFn(
     });
 }
 
+//定义了在请求空闲一段时间后调用 callOnCrawlEnd 的超时时间，单位为毫秒。
+const callCrawlEndIfIdleAfterMs = 50;
+
+interface CrawlEndFinder {
+  // 注册请求处理函数，接受一个唯一的 id 和一个处理完成的异步函数 done
+  registerRequestProcessing: (id: string, done: () => Promise<any>) => void;
+  //等待所有请求处理完成的方法，ignoredId 用于忽略某个请求的完成
+  waitForRequestsIdle: (ignoredId?: string) => Promise<void>;
+  //取消等待请求处理完成的操作
+  cancel: () => void;
+}
+
+//要用于管理请求处理的状态，并在所有请求处理完成时执行特定的回调函数 onCrawlEnd
+//接受一个 onCrawlEnd 回调函数作为参数，该函数将在所有请求处理完成后执行。
 function setupOnCrawlEnd(onCrawlEnd: () => void): CrawlEndFinder {
+  //存储已注册的请求处理标识符集合
   const registeredIds = new Set<string>();
+  // 存储已观察到的请求处理标识符集合
   const seenIds = new Set<string>();
+  //使用一个带有解析器的 Promise，用于等待请求处理完成。
   const onCrawlEndPromiseWithResolvers = promiseWithResolvers<void>();
 
+  //超时处理器，用于延迟调用 callOnCrawlEndWhenIdle
   let timeoutHandle: NodeJS.Timeout | undefined;
-
+  //标记是否取消了等待请求处理完成的操作。
   let cancelled = false;
+  //用于取消等待请求处理完成的操作
   function cancel() {
     cancelled = true;
   }
@@ -1046,17 +1258,22 @@ function setupOnCrawlEnd(onCrawlEnd: () => void): CrawlEndFinder {
   let crawlEndCalled = false;
   function callOnCrawlEnd() {
     if (!cancelled && !crawlEndCalled) {
+      //检查是否取消了操作，并且 crawlEndCalled 是否已经为 false
       crawlEndCalled = true;
       onCrawlEnd();
     }
+    //完成对 Promise 的解析
     onCrawlEndPromiseWithResolvers.resolve();
   }
 
+  //注册请求处理函数
   function registerRequestProcessing(
     id: string,
     done: () => Promise<any>
   ): void {
     if (!seenIds.has(id)) {
+      //如果 id 尚未被观察到（即不在 seenIds 中）
+      //则将其添加到 seenIds 和 registeredIds 中，并执行 done 函数。
       seenIds.add(id);
       registeredIds.add(id);
       done()
@@ -1065,25 +1282,37 @@ function setupOnCrawlEnd(onCrawlEnd: () => void): CrawlEndFinder {
     }
   }
 
+  //等待所有请求处理完成函数
   function waitForRequestsIdle(ignoredId?: string): Promise<void> {
     if (ignoredId) {
+      //如果提供了 ignoredId，则将其添加到 seenIds 中，并调用 markIdAsDone。
       seenIds.add(ignoredId);
       markIdAsDone(ignoredId);
     }
+    //等待请求处理完成后的 Promise。
     return onCrawlEndPromiseWithResolvers.promise;
   }
 
+  //标记请求处理完成函数
   function markIdAsDone(id: string): void {
     if (registeredIds.has(id)) {
+      //如果 registeredIds 中包含 id，则从 registeredIds 中删除，
+      //并调用 checkIfCrawlEndAfterTimeout 检查是否需要在空闲时调用 onCrawlEnd
       registeredIds.delete(id);
       checkIfCrawlEndAfterTimeout();
     }
   }
 
+  //用于检查是否在请求处理空闲一段时间后调用 onCrawlEnd
   function checkIfCrawlEndAfterTimeout() {
+    //如果已取消操作或者 registeredIds 集合中仍有未处理的请求，直接返回
     if (cancelled || registeredIds.size > 0) return;
 
+    //如果存在 timeoutHandle，则清除现有的超时处理器。
     if (timeoutHandle) clearTimeout(timeoutHandle);
+
+    //设置新的超时处理器，调用 callOnCrawlEndWhenIdle 函数，
+    //在指定的 callCrawlEndIfIdleAfterMs 毫秒后调用 onCrawlEnd。
     timeoutHandle = setTimeout(
       callOnCrawlEndWhenIdle,
       callCrawlEndIfIdleAfterMs
