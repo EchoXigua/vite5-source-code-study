@@ -60,7 +60,6 @@ import { ssrLoadModule } from "../ssr/ssrModuleLoader";
 import { ssrFetchModule } from "../ssr/ssrFetchModule";
 import { ssrFixStacktrace, ssrRewriteStacktrace } from "../ssr/ssrStacktrace";
 
-import { transformRequest } from "./transformRequest";
 import { ERR_OUTDATED_OPTIMIZED_DEP } from "../plugins/optimizedDeps";
 import { openBrowser as _openBrowser } from "./openBrowser";
 import { getDepsOptimizer, initDepsOptimizer } from "../optimizer";
@@ -91,6 +90,7 @@ import {
 import { notFoundMiddleware } from "./middlewares/notFound";
 
 //文件预热
+import { transformRequest } from "./transformRequest";
 import { warmupFiles } from "./warmup";
 
 export type HttpServer = http.Server | Http2SecureServer;
