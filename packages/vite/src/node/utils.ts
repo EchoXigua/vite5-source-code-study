@@ -416,3 +416,21 @@ const timestampRE = /\bt=\d{13}&?\b/;
 export function removeTimestampQuery(url: string): string {
   return url.replace(timestampRE, "").replace(trailingSeparatorRE, "");
 }
+
+// 用于匹配换行符（包括 Windows 和 Unix 格式的换行符 \r\n 和 \n）
+export const splitRE = /\r?\n/g;
+
+/**
+ * 在字符串每一行前面添加一定数量的空格，常用于格式化输出或者生成缩进文本的场景
+ *
+ * 原生有 padStart，不知道是不是很早之前处理的了
+ * @param source 待处理的字符串
+ * @param n 要添加的空格数
+ * @returns
+ */
+export function pad(source: string, n = 2): string {
+  // 将 source 字符串分割成行数组 lines
+  const lines = source.split(splitRE);
+  // 在每行前面添加指定数量的空格
+  return lines.map((l) => ` `.repeat(n) + l).join(`\n`);
+}

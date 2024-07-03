@@ -70,7 +70,7 @@ import type { BindCLIShortcutsOptions } from "../shortcuts";
 import { getFsUtils } from "../fsUtils";
 
 //中间件的处理
-import { errorMiddleware, prepareError } from "./middlewares/error";
+import { errorMiddleware, prepareError } from "./middlewares/error.ts";
 import { timeMiddleware } from "./middlewares/time";
 import {
   cachedTransformMiddleware,

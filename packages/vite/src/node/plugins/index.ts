@@ -1,7 +1,62 @@
 import type { HookHandler, Plugin, PluginWithRequiredHook } from "../plugin";
+import type { PluginHookUtils, ResolvedConfig } from "../config";
 
 export function getHookHandler(hook: any) {
   return (typeof hook === "object" ? hook.handler : hook) as any;
+}
+
+export function createPluginHookUtils(
+  plugins: readonly Plugin[]
+): PluginHookUtils {
+  // 用于缓存按钩子名称排序后的插件数组,可以提高性能，避免重复计算排序
+  const sortedPluginsCache = new Map<keyof Plugin, Plugin[]>();
+
+  /**
+   * 获取排序后的插件
+   * @param hookName
+   * @returns
+   */
+  function getSortedPlugins<K extends keyof Plugin>(
+    hookName: K
+  ): PluginWithRequiredHook<K>[] {
+    if (sortedPluginsCache.has(hookName))
+      return sortedPluginsCache.get(hookName) as PluginWithRequiredHook<K>[];
+
+    // 对 plugins 数组按照给定的钩子名称 hookName 进行排序，。
+    const sorted = getSortedPluginsByHook(hookName, plugins);
+    // 并将排序结果存入 sortedPluginsCache(设置缓存)
+    sortedPluginsCache.set(hookName, sorted);
+    return sorted;
+  }
+
+  /**
+   * 获取排序后插件的hook函数
+   * @param hookName
+   * @returns
+   */
+  function getSortedPluginHooks<K extends keyof Plugin>(
+    hookName: K
+  ): NonNullable<HookHandler<Plugin[K]>>[] {
+    // 获取排序后的插件
+    const plugins = getSortedPlugins(hookName);
+    // 遍历每个插件，并通过 getHookHandler 函数获取该插件在给定钩子上的处理函数
+    /**
+     * 使用 filter(Boolean) 过滤掉空值（未定义的处理函数）
+     *
+     * 怎么做到的？
+     *  当应用于数组时，filter(Boolean) 实际上会对数组中的每个元素应用 Boolean 函数。
+     *  Boolean 函数会将每个元素转换为布尔值并返回结果
+     *
+     *  1. 对于大多数对象来说，包括数组，Boolean(obj) 都会返回 true
+     *  2. 对于 undefined、null、0、''、NaN 等值，Boolean(value) 都会返回 false
+     */
+    return plugins.map((p) => getHookHandler(p[hookName])).filter(Boolean);
+  }
+
+  return {
+    getSortedPlugins,
+    getSortedPluginHooks,
+  };
 }
 
 /**

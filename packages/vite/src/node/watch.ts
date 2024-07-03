@@ -1,4 +1,5 @@
 import type { OutputOptions } from "rollup";
+import { EventEmitter } from "node:events";
 import path from "node:path";
 import glob from "fast-glob";
 import * as colors from "picocolors";
@@ -110,4 +111,38 @@ export function resolveChokidarOptions(
   };
 
   return resolvedWatchOptions;
+}
+
+class NoopWatcher extends EventEmitter implements FSWatcher {
+  constructor(public options: WatchOptions) {
+    super();
+  }
+
+  add() {
+    return this;
+  }
+
+  unwatch() {
+    return this;
+  }
+
+  getWatched() {
+    return {};
+  }
+
+  ref() {
+    return this;
+  }
+
+  unref() {
+    return this;
+  }
+
+  async close() {
+    // noop
+  }
+}
+
+export function createNoopWatcher(options: WatchOptions): FSWatcher {
+  return new NoopWatcher(options);
 }

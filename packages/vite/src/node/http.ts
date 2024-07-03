@@ -2,8 +2,11 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import type { OutgoingHttpHeaders as HttpServerHeaders } from "node:http";
 import type { ServerOptions as HttpsServerOptions } from "node:https";
+import colors from "picocolors";
 import type { Connect } from "dep-types/connect";
 import type { HttpServer } from "./server";
+import type { ProxyOptions } from "./server/middlewares/proxy";
+import type { Logger } from "./logger";
 
 export interface CommonServerOptions {
   /**
@@ -65,6 +68,21 @@ export interface CommonServerOptions {
    */
   headers?: HttpServerHeaders;
 }
+
+export interface CorsOptions {
+  origin?:
+    | CorsOrigin
+    | ((origin: string, cb: (err: Error, origins: CorsOrigin) => void) => void);
+  methods?: string | string[];
+  allowedHeaders?: string | string[];
+  exposedHeaders?: string | string[];
+  credentials?: boolean;
+  maxAge?: number;
+  preflightContinue?: boolean;
+  optionsSuccessStatus?: number;
+}
+
+export type CorsOrigin = boolean | string | RegExp | (string | RegExp)[];
 
 /**
  * 用于创建一个 HTTP 或 HTTPS 服务器，并根据配置选择使用 HTTP/1 或 HTTP/2 协议
@@ -135,4 +153,26 @@ async function readFileIfExists(value?: string | Buffer | any[]) {
   }
   //如果 value 不是字符串，则直接返回 value
   return value;
+}
+
+export function setClientErrorHandler(
+  server: HttpServer,
+  logger: Logger
+): void {
+  server.on("clientError", (err, socket) => {
+    let msg = "400 Bad Request";
+    if ((err as any).code === "HPE_HEADER_OVERFLOW") {
+      msg = "431 Request Header Fields Too Large";
+      logger.warn(
+        colors.yellow(
+          "Server responded with status code 431. " +
+            "See https://vitejs.dev/guide/troubleshooting.html#_431-request-header-fields-too-large."
+        )
+      );
+    }
+    if ((err as any).code === "ECONNRESET" || !socket.writable) {
+      return;
+    }
+    socket.end(`HTTP/1.1 ${msg}\r\n\r\n`);
+  });
 }
