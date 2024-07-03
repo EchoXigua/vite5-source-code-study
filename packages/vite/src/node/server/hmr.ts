@@ -1,8 +1,22 @@
 import path from "node:path";
+import type { Server } from "node:http";
 import { EventEmitter } from "node:events";
 
 import type { CustomPayload, HMRPayload, Update } from "types/hmrPayload";
 import { withTrailingSlash } from "../../shared/utils";
+
+export interface HmrOptions {
+  protocol?: string;
+  host?: string;
+  port?: number;
+  clientPort?: number;
+  path?: string;
+  timeout?: number;
+  overlay?: boolean;
+  server?: Server;
+  /** @internal */
+  channels?: HMRChannel[];
+}
 
 export interface HMRChannel {
   /**

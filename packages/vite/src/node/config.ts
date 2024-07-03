@@ -23,7 +23,7 @@ import {
   isFilePathESM,
   isNodeBuiltin,
   isObject,
-  // isParentDirectory,
+  isParentDirectory,
   mergeAlias,
   mergeConfig,
   normalizeAlias,
@@ -65,24 +65,24 @@ import {
 // } from "./plugins/css";
 import type { JsonOptions } from "./plugins/json";
 import type { ESBuildOptions } from "./plugins/esbuild";
-import type { ResolvedServerOptions, ServerOptions } from "./server";
-// import { resolveServerOptions } from "./server";
+// import type { ResolvedServerOptions, ServerOptions } from "./server";
+import { resolveServerOptions } from "./server";
 // import { resolvePreviewOptions } from "./preview";
-import type { PreviewOptions, ResolvedPreviewOptions } from "./preview";
+// import type { PreviewOptions, ResolvedPreviewOptions } from "./preview";
 
 import type { PluginContainer } from "./server/pluginContainer";
 import { createPluginContainer } from "./server/pluginContainer";
 
 import type {
   BuildOptions,
-  RenderBuiltAssetUrl,
+  // RenderBuiltAssetUrl,
   ResolvedBuildOptions,
 } from "./build";
-import type { PreviewOptions, ResolvedPreviewOptions } from "./preview";
-import type {
-  DepOptimizationConfig,
-  DepOptimizationOptions,
-} from "./optimizer";
+// import type { PreviewOptions, ResolvedPreviewOptions } from "./preview";
+// import type {
+//   DepOptimizationConfig,
+//   DepOptimizationOptions,
+// } from "./optimizer";
 // import type { ResolvedSSROptions, SSROptions } from "./ssr";
 import type { PackageCache } from "./packages";
 import { findNearestPackageData } from "./packages";

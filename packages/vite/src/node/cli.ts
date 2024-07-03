@@ -163,7 +163,6 @@ cli
     const { createServer } = await import("./server");
     console.log("dir:", process.cwd());
 
-    return;
     try {
       //创建一个 Vite 服务器实例
       const server = await createServer({
@@ -181,6 +180,10 @@ cli
         //确保 server.httpServer 存在，如果不存在则抛出错误
         throw new Error("HTTP server not available");
       }
+
+      console.log("server", server);
+
+      return;
 
       //启动服务器
       await server.listen();

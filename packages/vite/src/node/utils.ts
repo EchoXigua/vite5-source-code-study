@@ -13,7 +13,7 @@ import { createFilter as _createFilter } from "@rollup/pluginutils";
 
 import type { Alias, AliasOptions } from "dep-types/alias";
 
-import { isWindows, slash } from "../shared/utils";
+import { isWindows, slash, withTrailingSlash } from "../shared/utils";
 import {
   type PackageCache,
   findNearestPackageData,
@@ -23,7 +23,7 @@ import type { CommonServerOptions } from ".";
 import type { ResolvedConfig } from "./config";
 import type { ResolvedServerUrls, ViteDevServer } from "./server";
 import {
-  // CLIENT_ENTRY,
+  CLIENT_ENTRY,
   // CLIENT_PUBLIC_PATH,
   // ENV_PUBLIC_PATH,
   // FS_PREFIX,
@@ -709,10 +709,46 @@ export function createDebugger(
   }
 }
 
+function testCaseInsensitiveFS() {
+  if (!CLIENT_ENTRY.endsWith("client.mjs")) {
+    throw new Error(
+      `cannot test case insensitive FS, CLIENT_ENTRY const doesn't contain client.mjs`
+    );
+  }
+  if (!fs.existsSync(CLIENT_ENTRY)) {
+    throw new Error(
+      "cannot test case insensitive FS, CLIENT_ENTRY does not point to an existing file: " +
+        CLIENT_ENTRY
+    );
+  }
+  return fs.existsSync(CLIENT_ENTRY.replace("client.mjs", "cLiEnT.mjs"));
+}
+
+export const isCaseInsensitiveFS = testCaseInsensitiveFS();
+
 export function isParentDirectory(dir: string, file: string): boolean {
   dir = withTrailingSlash(dir);
   return (
     file.startsWith(dir) ||
     (isCaseInsensitiveFS && file.toLowerCase().startsWith(dir.toLowerCase()))
   );
+}
+
+export function isInNodeModules(id: string): boolean {
+  return id.includes("node_modules");
+}
+
+export function isFileReadable(filename: string): boolean {
+  if (!tryStatSync(filename)) {
+    return false;
+  }
+
+  try {
+    // Check if current process has read permission to the file
+    fs.accessSync(filename, fs.constants.R_OK);
+
+    return true;
+  } catch {
+    return false;
+  }
 }

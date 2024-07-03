@@ -1,4 +1,5 @@
 import path from "node:path";
+import { execSync } from "node:child_process";
 import type { Http2SecureServer } from "node:http2";
 import type * as net from "node:net";
 import { get as httpGet } from "node:http";
@@ -30,6 +31,8 @@ import {
   // handleHMRUpdate,
   // updateModules,
 } from "./hmr";
+import type { HMRBroadcaster, HmrOptions } from "./hmr";
+
 import { initPublicFiles } from "../publicDir";
 import {
   httpServerStart,
@@ -46,9 +49,9 @@ import {
 import { CLIENT_DIR, DEFAULT_DEV_PORT } from "../constants";
 import {
   // diffDnsOrderChange,
-  // isInNodeModules,
+  isInNodeModules,
   isObject,
-  // isParentDirectory,
+  isParentDirectory,
   mergeConfig,
   normalizePath,
   promiseWithResolvers,
@@ -91,10 +94,116 @@ import { printServerUrls } from "../logger";
 //   indexHtmlMiddleware,
 // } from "./middlewares/indexHtml";
 // import { notFoundMiddleware } from "./middlewares/notFound";
+import type { CommonServerOptions } from "../http";
+
+import { searchForWorkspaceRoot } from "./searchRoot";
 
 //文件预热
 import { transformRequest } from "./transformRequest";
 import { warmupFiles } from "./warmup";
+
+export interface ServerOptions extends CommonServerOptions {
+  /**
+   * Configure HMR-specific options (port, host, path & protocol)
+   */
+  hmr?: HmrOptions | boolean;
+  /**
+   * Warm-up files to transform and cache the results in advance. This improves the
+   * initial page load during server starts and prevents transform waterfalls.
+   */
+  warmup?: {
+    /**
+     * The files to be transformed and used on the client-side. Supports glob patterns.
+     */
+    clientFiles?: string[];
+    /**
+     * The files to be transformed and used in SSR. Supports glob patterns.
+     */
+    ssrFiles?: string[];
+  };
+  /**
+   * chokidar watch options or null to disable FS watching
+   * https://github.com/paulmillr/chokidar#api
+   */
+  watch?: WatchOptions | null;
+  /**
+   * Create Vite dev server to be used as a middleware in an existing server
+   * @default false
+   */
+  middlewareMode?:
+    | boolean
+    | {
+        /**
+         * Parent server instance to attach to
+         *
+         * This is needed to proxy WebSocket connections to the parent server.
+         */
+        server: http.Server;
+      };
+  /**
+   * Options for files served via '/\@fs/'.
+   */
+  fs?: FileSystemServeOptions;
+  /**
+   * Origin for the generated asset URLs.
+   *
+   * @example `http://127.0.0.1:8080`
+   */
+  origin?: string;
+  /**
+   * Pre-transform known direct imports
+   * @default true
+   */
+  preTransformRequests?: boolean;
+  /**
+   * Whether or not to ignore-list source files in the dev server sourcemap, used to populate
+   * the [`x_google_ignoreList` source map extension](https://developer.chrome.com/blog/devtools-better-angular-debugging/#the-x_google_ignorelist-source-map-extension).
+   *
+   * By default, it excludes all paths containing `node_modules`. You can pass `false` to
+   * disable this behavior, or, for full control, a function that takes the source path and
+   * sourcemap path and returns whether to ignore the source path.
+   */
+  sourcemapIgnoreList?:
+    | false
+    | ((sourcePath: string, sourcemapPath: string) => boolean);
+}
+
+export interface FileSystemServeOptions {
+  /**
+   * Strictly restrict file accessing outside of allowing paths.
+   *
+   * Set to `false` to disable the warning
+   *
+   * @default true
+   */
+  strict?: boolean;
+
+  /**
+   * Restrict accessing files outside the allowed directories.
+   *
+   * Accepts absolute path or a path relative to project root.
+   * Will try to search up for workspace root by default.
+   */
+  allow?: string[];
+
+  /**
+   * Restrict accessing files that matches the patterns.
+   *
+   * This will have higher priority than `allow`.
+   * picomatch patterns are supported.
+   *
+   * @default ['.env', '.env.*', '*.crt', '*.pem']
+   */
+  deny?: string[];
+
+  /**
+   * Enable caching of fs calls. It is enabled by default if no custom watch ignored patterns are provided.
+   *
+   * @experimental
+   * @default undefined
+   */
+  cachedChecks?: boolean;
+}
 
 export type HttpServer = http.Server | Http2SecureServer;
 
@@ -1334,4 +1443,78 @@ function setupOnCrawlEnd(onCrawlEnd: () => void): CrawlEndFinder {
     waitForRequestsIdle,
     cancel,
   };
+}
+
+export function resolveServerOptions(
+  root: string,
+  raw: ServerOptions | undefined,
+  logger: Logger
+): ResolvedServerOptions {
+  const server: ResolvedServerOptions = {
+    preTransformRequests: true,
+    ...(raw as Omit<ResolvedServerOptions, "sourcemapIgnoreList">),
+    sourcemapIgnoreList:
+      raw?.sourcemapIgnoreList === false
+        ? () => false
+        : raw?.sourcemapIgnoreList || isInNodeModules,
+    middlewareMode: raw?.middlewareMode || false,
+  };
+  let allowDirs = server.fs?.allow;
+  const deny = server.fs?.deny || [".env", ".env.*", "*.{crt,pem}"];
+
+  if (!allowDirs) {
+    allowDirs = [searchForWorkspaceRoot(root)];
+  }
+
+  if (process.versions.pnp) {
+    try {
+      const enableGlobalCache =
+        execSync("yarn config get enableGlobalCache", { cwd: root })
+          .toString()
+          .trim() === "true";
+      const yarnCacheDir = execSync(
+        `yarn config get ${enableGlobalCache ? "globalFolder" : "cacheFolder"}`,
+        { cwd: root }
+      )
+        .toString()
+        .trim();
+      allowDirs.push(yarnCacheDir);
+    } catch (e) {
+      logger.warn(`Get yarn cache dir error: ${e.message}`, {
+        timestamp: true,
+      });
+    }
+  }
+
+  allowDirs = allowDirs.map((i) => resolvedAllowDir(root, i));
+
+  // only push client dir when vite itself is outside-of-root
+  const resolvedClientDir = resolvedAllowDir(root, CLIENT_DIR);
+  if (!allowDirs.some((dir) => isParentDirectory(dir, resolvedClientDir))) {
+    allowDirs.push(resolvedClientDir);
+  }
+
+  server.fs = {
+    strict: server.fs?.strict ?? true,
+    allow: allowDirs,
+    deny,
+    cachedChecks: server.fs?.cachedChecks,
+  };
+
+  if (server.origin?.endsWith("/")) {
+    server.origin = server.origin.slice(0, -1);
+    logger.warn(
+      colors.yellow(
+        `${colors.bold("(!)")} server.origin should not end with "/". Using "${
+          server.origin
+        }" instead.`
+      )
+    );
+  }
+
+  return server;
+}
+
+function resolvedAllowDir(root: string, dir: string): string {
+  return normalizePath(path.resolve(root, dir));
 }

@@ -82,8 +82,6 @@ export function loadEnv(
       //{one: "a", two: "b", three: "c"}
    */
 
-  console.log("env parsed", parsed);
-
   //如果 parsed 中存在 NODE_ENV，并且 process.env.VITE_USER_NODE_ENV 未定义，则将其设置为 parsed.NODE_ENV。
   //类似地，处理 BROWSER 和 BROWSER_ARGS 变量
 

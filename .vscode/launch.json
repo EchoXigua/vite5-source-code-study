@@ -1,0 +1,28 @@
+{
+    // 使用 IntelliSense 了解相关属性。 
+    // 悬停以查看现有属性的描述。
+    // 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "node",
+            // 表示启动调试会话
+            "request": "launch",
+            "name": "cli 调试",
+            // 指定运行时可执行文件
+            "runtimeExecutable": "npx",
+            // 传递给运行时的参数
+            "runtimeArgs": ["tsx"],
+            "args": ["${workspaceFolder}\\packages\\vite\\src\\node\\cli.ts"],
+            // 指定当前工作目录，通常是 ${workspaceFolder}，即项目的根目录
+            "cwd": "${workspaceFolder}",
+            "skipFiles": [
+                "<node_internals>/**"
+            ],
+            // "program": "${workspaceFolder}\\packages\\vite\\src\\node\\server\\index.ts",
+            "outFiles": [
+                "${workspaceFolder}/**/*.js"
+            ]
+        }
+    ]
+}
