@@ -1,10 +1,12 @@
+import path from "node:path";
+import fs from "node:fs";
 import { cac } from "cac";
 import colors from "picocolors";
 import { VERSION } from "./constants";
 // import type { ServerOptions } from "./server";
 import type { LogLevel } from "./logger";
 import { createLogger } from "./logger";
-import type { CLIShortcut } from "./shortcuts";
+// import type { CLIShortcut } from "./shortcuts";
 
 const cli = cac("vite");
 
@@ -161,6 +163,7 @@ cli
     const { createServer } = await import("./server");
     console.log("dir:", process.cwd());
 
+    return;
     try {
       //创建一个 Vite 服务器实例
       const server = await createServer({

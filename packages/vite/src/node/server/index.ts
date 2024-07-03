@@ -18,14 +18,17 @@ import launchEditorMiddleware from "launch-editor-middleware";
 
 import { createWebSocketServer } from "./ws";
 import { getEnvFilesForMode } from "../env";
-import { isDepsOptimizerEnabled, resolveConfig } from "../config";
+import {
+  // isDepsOptimizerEnabled,
+  resolveConfig,
+} from "../config";
 import type { InlineConfig, ResolvedConfig } from "../config";
 import {
   createHMRBroadcaster,
   createServerHMRChannel,
   getShortName,
-  handleHMRUpdate,
-  updateModules,
+  // handleHMRUpdate,
+  // updateModules,
 } from "./hmr";
 import { initPublicFiles } from "../publicDir";
 import {
@@ -42,10 +45,10 @@ import {
 } from "../watch";
 import { CLIENT_DIR, DEFAULT_DEV_PORT } from "../constants";
 import {
-  diffDnsOrderChange,
-  isInNodeModules,
+  // diffDnsOrderChange,
+  // isInNodeModules,
   isObject,
-  isParentDirectory,
+  // isParentDirectory,
   mergeConfig,
   normalizePath,
   promiseWithResolvers,
@@ -55,39 +58,39 @@ import {
 import { ModuleGraph } from "./moduleGraph";
 import type { ModuleNode } from "./moduleGraph";
 import { ERR_CLOSED_SERVER, createPluginContainer } from "./pluginContainer";
-import { ssrTransform } from "../ssr/ssrTransform";
-import { ssrLoadModule } from "../ssr/ssrModuleLoader";
-import { ssrFetchModule } from "../ssr/ssrFetchModule";
-import { ssrFixStacktrace, ssrRewriteStacktrace } from "../ssr/ssrStacktrace";
+// import { ssrTransform } from "../ssr/ssrTransform";
+// import { ssrLoadModule } from "../ssr/ssrModuleLoader";
+// import { ssrFetchModule } from "../ssr/ssrFetchModule";
+// import { ssrFixStacktrace, ssrRewriteStacktrace } from "../ssr/ssrStacktrace";
 
-import { ERR_OUTDATED_OPTIMIZED_DEP } from "../plugins/optimizedDeps";
+// import { ERR_OUTDATED_OPTIMIZED_DEP } from "../plugins/optimizedDeps";
 import { openBrowser as _openBrowser } from "./openBrowser";
-import { getDepsOptimizer, initDepsOptimizer } from "../optimizer";
+// import { getDepsOptimizer, initDepsOptimizer } from "../optimizer";
 import { printServerUrls } from "../logger";
-import { bindCLIShortcuts } from "../shortcuts";
-import type { BindCLIShortcutsOptions } from "../shortcuts";
-import { getFsUtils } from "../fsUtils";
+// import { bindCLIShortcuts } from "../shortcuts";
+// import type { BindCLIShortcutsOptions } from "../shortcuts";
+// import { getFsUtils } from "../fsUtils";
 
 //中间件的处理
-import { errorMiddleware, prepareError } from "./middlewares/error.ts";
-import { timeMiddleware } from "./middlewares/time";
-import {
-  cachedTransformMiddleware,
-  transformMiddleware,
-} from "./middlewares/transform";
-import { proxyMiddleware } from "./middlewares/proxy";
-import { baseMiddleware } from "./middlewares/base";
-import {
-  servePublicMiddleware,
-  serveRawFsMiddleware,
-  serveStaticMiddleware,
-} from "./middlewares/static";
-import { htmlFallbackMiddleware } from "./middlewares/htmlFallback";
-import {
-  createDevHtmlTransformFn,
-  indexHtmlMiddleware,
-} from "./middlewares/indexHtml";
-import { notFoundMiddleware } from "./middlewares/notFound";
+// import { errorMiddleware, prepareError } from "./middlewares/error.ts";
+// import { timeMiddleware } from "./middlewares/time";
+// import {
+//   cachedTransformMiddleware,
+//   transformMiddleware,
+// } from "./middlewares/transform";
+// import { proxyMiddleware } from "./middlewares/proxy";
+// import { baseMiddleware } from "./middlewares/base";
+// import {
+//   servePublicMiddleware,
+//   serveRawFsMiddleware,
+//   serveStaticMiddleware,
+// } from "./middlewares/static";
+// import { htmlFallbackMiddleware } from "./middlewares/htmlFallback";
+// import {
+//   createDevHtmlTransformFn,
+//   indexHtmlMiddleware,
+// } from "./middlewares/indexHtml";
+// import { notFoundMiddleware } from "./middlewares/notFound";
 
 //文件预热
 import { transformRequest } from "./transformRequest";
@@ -288,6 +291,11 @@ export interface ViteDevServer {
   _configServerPort?: number | undefined;
 }
 
+export interface ResolvedServerUrls {
+  local: string[];
+  network: string[];
+}
+
 export function createServer(inlineConfig = {}) {
   return _createServer(inlineConfig, { hotListen: true });
 }
@@ -393,7 +401,7 @@ export async function _createServer(
   let exitProcess: () => void;
 
   //创建开发环境下的 HTML 转换函数：
-  const devHtmlTransformFn = createDevHtmlTransformFn(config);
+  // const devHtmlTransformFn = createDevHtmlTransformFn(config);
 
   //用于存储在爬取结束时需要执行的回调函数
   const onCrawlEndCallbacks: (() => void)[] = [];
@@ -725,12 +733,12 @@ export async function _createServer(
       //只有当 serverConfig.hmr 不等于 false 时才会继续执行后续操作。
       try {
         //处理具体的 HMR 更新操作
-        await handleHMRUpdate(type, file, server);
+        // await handleHMRUpdate(type, file, server);
       } catch (err) {
         //发送错误热更新广播器
         hot.send({
           type: "error",
-          err: prepareError(err),
+          // err: prepareError(err),
         });
       }
     }
@@ -790,7 +798,7 @@ export async function _createServer(
     await onHMRUpdate("update", file);
   });
 
-  getFsUtils(config).initWatcher?.(watcher);
+  // getFsUtils(config).initWatcher?.(watcher);
 
   //监听文件的添加
   watcher.on("add", (file) => {
@@ -827,13 +835,13 @@ export async function _createServer(
       const file = getShortName(mod.file!, config.root);
 
       // 更新依赖该模块的模块
-      updateModules(
-        file,
-        [...mod.importers],
-        mod.lastHMRTimestamp,
-        server,
-        true // 标记为模块的强制更新
-      );
+      // updateModules(
+      //   file,
+      //   [...mod.importers],
+      //   mod.lastHMRTimestamp,
+      //   server,
+      //   true // 标记为模块的强制更新
+      // );
     }
   });
 
@@ -862,11 +870,10 @@ export async function _createServer(
   // 请求计时中间件
   if (process.env.DEBUG) {
     //仅当环境变量 DEBUG 设置时启用
-
     //使用 middlewares.use 方法，将 timeMiddleware 添加到中间件栈中。
     //timeMiddleware 接受 root 目录作为参数，
     //负责记录请求的开始时间和结束时间，从而计算请求处理所需的时间。
-    middlewares.use(timeMiddleware(root));
+    // middlewares.use(timeMiddleware(root));
   }
 
   // 处理跨域资源共享（CORS），使服务器能够处理跨域请求。
@@ -877,20 +884,20 @@ export async function _createServer(
   }
 
   //缓存转换中间件，处理缓存的转换，以提高性能
-  middlewares.use(cachedTransformMiddleware(server));
+  // middlewares.use(cachedTransformMiddleware(server));
 
   // 配置代理
   const { proxy } = serverConfig;
   if (proxy) {
     const middlewareServer =
       (isObject(middlewareMode) ? middlewareMode.server : null) || httpServer;
-    middlewares.use(proxyMiddleware(middlewareServer, proxy, config));
+    // middlewares.use(proxyMiddleware(middlewareServer, proxy, config));
   }
 
   // 基础路径
   if (config.base !== "/") {
     // 只有在 config.base 不是默认值 / 时才会启用基础路径中间件
-    middlewares.use(baseMiddleware(config.rawBase, !!middlewareMode));
+    // middlewares.use(baseMiddleware(config.rawBase, !!middlewareMode));
   }
 
   // 打开编辑器支持中间件
@@ -917,21 +924,21 @@ export async function _createServer(
   // 在 /public 目录下提供静态文件服务
   // 这适用于转换中间件之前，这样这些文件就可以按原样提供而不需要转换。
   if (publicDir) {
-    middlewares.use(servePublicMiddleware(server, publicFiles));
+    // middlewares.use(servePublicMiddleware(server, publicFiles));
   }
 
   // 主要的文件转换中间件
-  middlewares.use(transformMiddleware(server));
+  // middlewares.use(transformMiddleware(server));
 
   // 提供静态文件服务
-  middlewares.use(serveRawFsMiddleware(server));
-  middlewares.use(serveStaticMiddleware(server));
+  // middlewares.use(serveRawFsMiddleware(server));
+  // middlewares.use(serveStaticMiddleware(server));
 
   // html 回退，为单页应用（SPA）或多页应用（MPA）提供 HTML 回退功能
   if (config.appType === "spa" || config.appType === "mpa") {
-    middlewares.use(
-      htmlFallbackMiddleware(root, config.appType === "spa", getFsUtils(config))
-    );
+    // middlewares.use(
+    //   htmlFallbackMiddleware(root, config.appType === "spa", getFsUtils(config))
+    // );
   }
 
   /**
@@ -942,14 +949,13 @@ export async function _createServer(
   //对于单页应用（SPA）或多页应用（MPA），提供 index.html 的转换和 404 错误处理。
   if (config.appType === "spa" || config.appType === "mpa") {
     // transform index.html
-    middlewares.use(indexHtmlMiddleware(root, server));
-
+    // middlewares.use(indexHtmlMiddleware(root, server));
     // handle 404s
-    middlewares.use(notFoundMiddleware());
+    // middlewares.use(notFoundMiddleware());
   }
 
   // 处理服务器中的一般错误，该中间件可以在请求处理过程中捕获到的任何错误，并进行适当的处理和记录
-  middlewares.use(errorMiddleware(server, !!middlewareMode));
+  // middlewares.use(errorMiddleware(server, !!middlewareMode));
 
   // httpServer.listen can be called multiple times
   // when port when using next port number
@@ -986,10 +992,10 @@ export async function _createServer(
       // 调用 buildStart 钩子函数，开始构建过程
       await container.buildStart({});
       // 在所有容器插件准备好后启动深度优化器
-      if (isDepsOptimizerEnabled(config, false)) {
-        //如果启用了依赖优化器，则初始化依赖优化器
-        await initDepsOptimizer(config, server);
-      }
+      // if (isDepsOptimizerEnabled(config, false)) {
+      //   //如果启用了依赖优化器，则初始化依赖优化器
+      //   await initDepsOptimizer(config, server);
+      // }
 
       //调用 warmupFiles 函数，对一些文件进行预热，以提高性能
       warmupFiles(server);
@@ -1172,7 +1178,7 @@ async function restartServer(server: ViteDevServer) {
   if (shortcutsOptions) {
     //如果存在 CLI 快捷方式选项，则禁用打印，并重新绑定服务器的 CLI 快捷方式。
     shortcutsOptions.print = false;
-    bindCLIShortcuts(server, shortcutsOptions);
+    // bindCLIShortcuts(server, shortcutsOptions);
   }
 
   //这段代码通过创建新的服务器实例并在关闭旧实例后进行属性复制，实现了服务器的平滑重启过程，

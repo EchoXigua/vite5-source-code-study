@@ -9,25 +9,25 @@ import colors from "picocolors";
 import type { ModuleNode, ViteDevServer } from "..";
 import {
   createDebugger,
-  ensureWatchedFile,
-  injectQuery,
+  // ensureWatchedFile,
+  // injectQuery,
   isObject,
-  prettifyUrl,
+  // prettifyUrl,
   removeImportQuery,
   removeTimestampQuery,
-  stripBase,
-  timeFrom,
+  // stripBase,
+  // timeFrom,
 } from "../utils";
-import { checkPublicFile } from "../publicDir";
-import { isDepsOptimizerEnabled } from "../config";
-import { getDepsOptimizer, initDevSsrDepsOptimizer } from "../optimizer";
+// import { checkPublicFile } from "../publicDir";
+// import { isDepsOptimizerEnabled } from "../config";
+// import { getDepsOptimizer, initDevSsrDepsOptimizer } from "../optimizer";
 import { cleanUrl, unwrapId } from "../../shared/utils";
-import {
-  applySourcemapIgnoreList,
-  extractSourcemapFromFile,
-  injectSourcesContent,
-} from "./sourcemap";
-import { isFileServingAllowed } from "./middlewares/static";
+// import {
+//   applySourcemapIgnoreList,
+//   extractSourcemapFromFile,
+//   injectSourcesContent,
+// } from "./sourcemap";
+// import { isFileServingAllowed } from "./middlewares/static";
 import { throwClosedServerError } from "./pluginContainer";
 
 export const ERR_LOAD_URL = "ERR_LOAD_URL";
@@ -177,7 +177,7 @@ async function doTransform(
 
   // 如果启用了 SSR 依赖优化器，则初始化它
   if (ssr && isDepsOptimizerEnabled(config, true)) {
-    await initDevSsrDepsOptimizer(config, server);
+    // await initDevSsrDepsOptimizer(config, server);
   }
 
   // 获取模块
@@ -230,7 +230,6 @@ async function doTransform(
 
   if (!ssr) {
     // 注册客户端请求
-
     /**
      * 为什么要做这一步？
      *
@@ -242,14 +241,13 @@ async function doTransform(
      *      注册请求处理的目的是为了确保在未优化处理的情况下，只有第一个请求会执行加载和转换过程。
      *      对于后续的相同模块请求，直接返回已经处理好的结果，节省了重新处理的时间，从而提高了客户端的加载速度和响应性能。
      */
-
     // 获取依赖优化器实例
-    const depsOptimizer = getDepsOptimizer(config, ssr);
-    // 如果依赖优化器存在且当前模块文件未被优化，则注册请求处理
-    if (!depsOptimizer?.isOptimizedDepFile(id)) {
-      // 注册请求处理函数。此函数将确保在模块请求过程中处理模块的转换结果
-      server._registerRequestProcessing(id, () => result);
-    }
+    // const depsOptimizer = getDepsOptimizer(config, ssr);
+    // // 如果依赖优化器存在且当前模块文件未被优化，则注册请求处理
+    // if (!depsOptimizer?.isOptimizedDepFile(id)) {
+    //   // 注册请求处理函数。此函数将确保在模块请求过程中处理模块的转换结果
+    //   server._registerRequestProcessing(id, () => result);
+    // }
   }
 
   return result;
@@ -349,7 +347,8 @@ async function loadAndTransform(
     // like /service-worker.js or /api/users
 
     // 如果允许服务器端渲染 (ssr) 或文件服务允许
-    if (options.ssr || isFileServingAllowed(file, server)) {
+    // if (options.ssr || isFileServingAllowed(file, server)) {
+    if (options.ssr || true) {
       try {
         // 取到文件内容
         code = await fsp.readFile(file, "utf-8");
@@ -371,11 +370,11 @@ async function loadAndTransform(
     if (code) {
       try {
         // 从文件中提取源映射信息 source map
-        const extracted = await extractSourcemapFromFile(code, file);
-        if (extracted) {
-          code = extracted.code;
-          map = extracted.map;
-        }
+        // const extracted = await extractSourcemapFromFile(code, file);
+        // if (extracted) {
+        //   code = extracted.code;
+        //   map = extracted.map;
+        // }
       } catch (e) {
         // source map 加载失败
         logger.warn(`Failed to load source map for ${file}.\n${e}`, {
@@ -480,18 +479,18 @@ async function loadAndTransform(
     // 包含映射信息 (mappings)
     if (normalizedMap.mappings) {
       // 注入源内容
-      await injectSourcesContent(normalizedMap, mod.file, logger);
+      // await injectSourcesContent(normalizedMap, mod.file, logger);
     }
 
     // 构建源码映射文件的路径
     const sourcemapPath = `${mod.file}.map`;
     // 应用源映射忽略列表
-    applySourcemapIgnoreList(
-      normalizedMap,
-      sourcemapPath,
-      config.server.sourcemapIgnoreList,
-      logger
-    );
+    // applySourcemapIgnoreList(
+    //   normalizedMap,
+    //   sourcemapPath,
+    //   config.server.sourcemapIgnoreList,
+    //   logger
+    // );
 
     // 如果模块文件路径是绝对路径
     if (path.isAbsolute(mod.file)) {

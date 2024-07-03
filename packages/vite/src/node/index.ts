@@ -11,3 +11,4 @@ export type {
   ModuleNode,
   ResolvedUrl,
 } from "./server/moduleGraph";
+export type { CorsOptions, CorsOrigin, CommonServerOptions } from "./http";

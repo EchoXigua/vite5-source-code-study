@@ -1,6 +1,8 @@
+import path from "node:path";
 import { EventEmitter } from "node:events";
 
 import type { CustomPayload, HMRPayload, Update } from "types/hmrPayload";
+import { withTrailingSlash } from "../../shared/utils";
 
 export interface HMRChannel {
   /**
@@ -146,4 +148,16 @@ export function createServerHMRChannel(): ServerHMRChannel {
       outsideEmitter,
     },
   };
+}
+
+/**
+ * 用于获取一个文件相对于某个根目录的相对路径。如果文件不在该根目录下，则返回文件的原始路径
+ * @param file
+ * @param root
+ * @returns
+ */
+export function getShortName(file: string, root: string): string {
+  return file.startsWith(withTrailingSlash(root))
+    ? path.posix.relative(root, file)
+    : file;
 }

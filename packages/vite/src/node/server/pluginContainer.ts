@@ -69,17 +69,17 @@ import type { FSWatcher } from "chokidar";
 import colors from "picocolors";
 import type { Plugin } from "../plugin";
 import {
-  combineSourcemaps,
+  // combineSourcemaps,
   createDebugger,
-  ensureWatchedFile,
-  generateCodeFrame,
+  // ensureWatchedFile,
+  // generateCodeFrame,
   isExternalUrl,
   isObject,
   normalizePath,
-  numberToPos,
-  prettifyUrl,
+  // numberToPos,
+  // prettifyUrl,
   rollupVersion,
-  timeFrom,
+  // timeFrom,
 } from "../utils";
 import { FS_PREFIX } from "../constants";
 import type { ResolvedConfig } from "../config";

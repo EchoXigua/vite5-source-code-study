@@ -220,10 +220,6 @@ function traverseBetweenDirs(
   }
 }
 
-export let safeRealpathSync = isWindows
-  ? windowsSafeRealPathSync
-  : fs.realpathSync.native;
-
 /**
  * 用于查找指定目录及其父目录中最近的 package.json 文件，并返回其数据
  *

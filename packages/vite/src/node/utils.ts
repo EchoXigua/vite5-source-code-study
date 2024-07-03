@@ -1,9 +1,13 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { exec } from "node:child_process";
 import { URL, fileURLToPath } from "node:url";
 import { builtinModules, createRequire } from "node:module";
 import fsp from "node:fs/promises";
+import type { AddressInfo, Server } from "node:net";
+import { promises as dns } from "node:dns";
+import debug from "debug";
 
 import { createFilter as _createFilter } from "@rollup/pluginutils";
 
@@ -15,6 +19,18 @@ import {
   findNearestPackageData,
   resolvePackageData,
 } from "./packages";
+import type { CommonServerOptions } from ".";
+import type { ResolvedConfig } from "./config";
+import type { ResolvedServerUrls, ViteDevServer } from "./server";
+import {
+  // CLIENT_ENTRY,
+  // CLIENT_PUBLIC_PATH,
+  // ENV_PUBLIC_PATH,
+  // FS_PREFIX,
+  // OPTIMIZABLE_ENTRY_RE,
+  loopbackHosts,
+  wildcardHosts,
+} from "./constants";
 
 /**
  * Inlined to keep `@rollup/pluginutils` in devDependencies
@@ -433,4 +449,270 @@ export function pad(source: string, n = 2): string {
   const lines = source.split(splitRE);
   // 在每行前面添加指定数量的空格
   return lines.map((l) => ` `.repeat(n) + l).join(`\n`);
+}
+
+export let safeRealpathSync = isWindows
+  ? windowsSafeRealPathSync
+  : fs.realpathSync.native;
+
+const windowsNetworkMap = new Map();
+function windowsMappedRealpathSync(path: string) {
+  const realPath = fs.realpathSync.native(path);
+  if (realPath.startsWith("\\\\")) {
+    for (const [network, volume] of windowsNetworkMap) {
+      if (realPath.startsWith(network))
+        return realPath.replace(network, volume);
+    }
+  }
+  return realPath;
+}
+
+const parseNetUseRE = /^(\w+)? +(\w:) +([^ ]+)\s/;
+let firstSafeRealPathSyncRun = false;
+
+function windowsSafeRealPathSync(path: string): string {
+  if (!firstSafeRealPathSyncRun) {
+    optimizeSafeRealPathSync();
+    firstSafeRealPathSyncRun = true;
+  }
+  return fs.realpathSync(path);
+}
+
+function optimizeSafeRealPathSync() {
+  // Skip if using Node <18.10 due to MAX_PATH issue: https://github.com/vitejs/vite/issues/12931
+  const nodeVersion = process.versions.node.split(".").map(Number);
+  if (nodeVersion[0] < 18 || (nodeVersion[0] === 18 && nodeVersion[1] < 10)) {
+    safeRealpathSync = fs.realpathSync;
+    return;
+  }
+  // Check the availability `fs.realpathSync.native`
+  // in Windows virtual and RAM disks that bypass the Volume Mount Manager, in programs such as imDisk
+  // get the error EISDIR: illegal operation on a directory
+  try {
+    fs.realpathSync.native(path.resolve("./"));
+  } catch (error) {
+    if (error.message.includes("EISDIR: illegal operation on a directory")) {
+      safeRealpathSync = fs.realpathSync;
+      return;
+    }
+  }
+  exec("net use", (error, stdout) => {
+    if (error) return;
+    const lines = stdout.split("\n");
+    // OK           Y:        \\NETWORKA\Foo         Microsoft Windows Network
+    // OK           Z:        \\NETWORKA\Bar         Microsoft Windows Network
+    for (const line of lines) {
+      const m = line.match(parseNetUseRE);
+      if (m) windowsNetworkMap.set(m[3], m[2]);
+    }
+    if (windowsNetworkMap.size === 0) {
+      safeRealpathSync = fs.realpathSync.native;
+    } else {
+      safeRealpathSync = windowsMappedRealpathSync;
+    }
+  });
+}
+
+export function promiseWithResolvers<T>(): PromiseWithResolvers<T> {
+  let resolve: any;
+  let reject: any;
+  const promise = new Promise<T>((_resolve, _reject) => {
+    resolve = _resolve;
+    reject = _reject;
+  });
+  return { promise, resolve, reject };
+}
+
+export interface Hostname {
+  /** undefined sets the default behaviour of server.listen */
+  host: string | undefined;
+  /** resolve to localhost when possible */
+  name: string;
+}
+
+/**
+ * 用于解析主机名
+ * @param optionsHost
+ * @returns 包含主机和名称的对象
+ */
+export async function resolveHostname(
+  optionsHost: string | boolean | undefined
+): Promise<Hostname> {
+  let host: string | undefined;
+  if (optionsHost === undefined || optionsHost === false) {
+    // 使用默认值 "localhost"
+    host = "localhost";
+  } else if (optionsHost === true) {
+    // 表示在 CLI 中传递了 --host 而没有参数，
+    host = undefined; // host 设置为 undefined（这通常意味着监听所有 IP 地址）
+  } else {
+    host = optionsHost;
+  }
+
+  // 尽可能将主机名设置为localhost
+  let name = host === undefined || wildcardHosts.has(host) ? "localhost" : host;
+
+  // 处理 localhost 特殊情况：
+  if (host === "localhost") {
+    // See #8647 for more details.
+    const localhostAddr = await getLocalhostAddressIfDiffersFromDNS();
+    if (localhostAddr) {
+      name = localhostAddr;
+    }
+  }
+
+  return { host, name };
+}
+
+/**
+ * 用于解析服务器的本地和网络 URL。这个函数主要是为了在启动服务器后，生成服务器的本地和网络访问地址。
+ * @param server 服务器实例
+ * @param options 包含服务器配置选项
+ * @param config 解析后的配置
+ * @returns
+ */
+export async function resolveServerUrls(
+  server: Server,
+  options: CommonServerOptions,
+  config: ResolvedConfig
+): Promise<ResolvedServerUrls> {
+  // 获取服务器地址
+  const address = server.address();
+
+  // 检查地址是否有效，如果地址无效，则返回空的本地和网络地址数组。
+  const isAddressInfo = (x: any): x is AddressInfo => x?.address;
+  if (!isAddressInfo(address)) {
+    return { local: [], network: [] };
+  }
+
+  // 初始化变量
+  const local: string[] = [];
+  const network: string[] = [];
+  const hostname = await resolveHostname(options.host);
+  const protocol = options.https ? "https" : "http";
+  const port = address.port;
+  const base =
+    config.rawBase === "./" || config.rawBase === "" ? "/" : config.rawBase;
+
+  // 处理特定的主机名
+  if (hostname.host !== undefined && !wildcardHosts.has(hostname.host)) {
+    // !wildcardHosts.has(hostname.host)：
+    // 检查 hostname.host 是否不在 wildcardHosts 集合中，确保主机名不是通配符
+    let hostnameName = hostname.name;
+    // ipv6 host
+    if (hostnameName.includes(":")) {
+      // 如果主机名包含冒号（表示是 IPv6 地址），则将其包裹在方括号中
+      hostnameName = `[${hostnameName}]`;
+    }
+    // 构建完整的 URL
+    const address = `${protocol}://${hostnameName}:${port}${base}`;
+    if (loopbackHosts.has(hostname.host)) {
+      local.push(address);
+    } else {
+      network.push(address);
+    }
+  } else {
+    // 通配符主机名情况处理
+
+    // 获取所有网络接口
+    Object.values(os.networkInterfaces())
+      // 使用 flatMap 展开每个网络接口的细节数组（处理 undefined 的情况）
+      .flatMap((nInterface) => nInterface ?? [])
+      .filter(
+        // 使用 filter 过滤出有效的 IPv4 地址（包括处理 Node 18.0 - 18.3 返回数字的情况）
+        (detail) =>
+          detail &&
+          detail.address &&
+          (detail.family === "IPv4" ||
+            // @ts-expect-error Node 18.0 - 18.3 returns number
+            detail.family === 4)
+      )
+      .forEach((detail) => {
+        // 遍历每个网络接口的细节，构建主机名和 URL
+        let host = detail.address.replace("127.0.0.1", hostname.name);
+        // ipv6 host
+        if (host.includes(":")) {
+          host = `[${host}]`;
+        }
+        const url = `${protocol}://${host}:${port}${base}`;
+        if (detail.address.includes("127.0.0.1")) {
+          local.push(url);
+        } else {
+          network.push(url);
+        }
+      });
+  }
+  return { local, network };
+}
+
+/**
+ * 用于检查 Node.js 内部解析的 localhost 地址和 DNS 系统解析的 localhost 地址是否相同。
+ * 如果两者不同，则返回 Node.js 内部解析的地址；如果相同，则返回 undefined。
+ * @returns
+ */
+export async function getLocalhostAddressIfDiffersFromDNS(): Promise<
+  string | undefined
+> {
+  // 同时进行两次 localhost 的 DNS 查找：
+  const [nodeResult, dnsResult] = await Promise.all([
+    dns.lookup("localhost"), //Node.js 的默认 localhost 查找方式
+    dns.lookup("localhost", { verbatim: true }), //按照 DNS 系统解析顺序进行的查找
+  ]);
+
+  // 比较查找结果：
+  // family：表示地址族（例如 IPv4 或 IPv6）
+  // address：表示解析后的 IP 地址
+  const isSame =
+    nodeResult.family === dnsResult.family &&
+    nodeResult.address === dnsResult.address;
+  return isSame ? undefined : nodeResult.address;
+}
+
+export function resolveDependencyVersion(
+  dep: string,
+  pkgRelativePath = "../../package.json"
+): string {
+  const pkgPath = path.resolve(_require.resolve(dep), pkgRelativePath);
+  return JSON.parse(fs.readFileSync(pkgPath, "utf-8")).version;
+}
+
+export const rollupVersion = resolveDependencyVersion("rollup");
+
+const filter = process.env.VITE_DEBUG_FILTER;
+const DEBUG = process.env.DEBUG;
+
+interface DebuggerOptions {
+  onlyWhenFocused?: boolean | string;
+}
+export type ViteDebugScope = `vite:${string}`;
+
+export function createDebugger(
+  namespace: ViteDebugScope,
+  options: DebuggerOptions = {}
+): debug.Debugger["log"] | undefined {
+  const log = debug(namespace);
+  const { onlyWhenFocused } = options;
+
+  let enabled = log.enabled;
+  if (enabled && onlyWhenFocused) {
+    const ns =
+      typeof onlyWhenFocused === "string" ? onlyWhenFocused : namespace;
+    enabled = !!DEBUG?.includes(ns);
+  }
+
+  if (enabled) {
+    return (...args: [string, ...any[]]) => {
+      if (!filter || args.some((a) => a?.includes?.(filter))) {
+        log(...args);
+      }
+    };
+  }
+}
+
+export function isParentDirectory(dir: string, file: string): boolean {
+  dir = withTrailingSlash(dir);
+  return (
+    file.startsWith(dir) ||
+    (isCaseInsensitiveFS && file.toLowerCase().startsWith(dir.toLowerCase()))
+  );
 }

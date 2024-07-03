@@ -23,13 +23,13 @@ import {
   isFilePathESM,
   isNodeBuiltin,
   isObject,
-  isParentDirectory,
+  // isParentDirectory,
   mergeAlias,
   mergeConfig,
   normalizeAlias,
   normalizePath,
 } from "./utils";
-import { getFsUtils } from "./fsUtils";
+// import { getFsUtils } from "./fsUtils";
 
 import type { HookHandler, Plugin, PluginWithRequiredHook } from "./plugin";
 
@@ -53,21 +53,21 @@ import {
   createPluginHookUtils,
   getHookHandler,
   getSortedPluginsByHook,
-  resolvePlugins,
+  // resolvePlugins,
 } from "./plugins";
-import type { InternalResolveOptions, ResolveOptions } from "./plugins/resolve";
-import { resolvePlugin, tryNodeResolve } from "./plugins/resolve";
+// import type { InternalResolveOptions, ResolveOptions } from "./plugins/resolve";
+// import { resolvePlugin, tryNodeResolve } from "./plugins/resolve";
 
-import {
-  type CSSOptions,
-  type ResolvedCSSOptions,
-  resolveCSSOptions,
-} from "./plugins/css";
+// import {
+//   type CSSOptions,
+//   type ResolvedCSSOptions,
+//   resolveCSSOptions,
+// } from "./plugins/css";
 import type { JsonOptions } from "./plugins/json";
 import type { ESBuildOptions } from "./plugins/esbuild";
 import type { ResolvedServerOptions, ServerOptions } from "./server";
-import { resolveServerOptions } from "./server";
-import { resolvePreviewOptions } from "./preview";
+// import { resolveServerOptions } from "./server";
+// import { resolvePreviewOptions } from "./preview";
 import type { PreviewOptions, ResolvedPreviewOptions } from "./preview";
 
 import type { PluginContainer } from "./server/pluginContainer";
@@ -83,7 +83,7 @@ import type {
   DepOptimizationConfig,
   DepOptimizationOptions,
 } from "./optimizer";
-import type { ResolvedSSROptions, SSROptions } from "./ssr";
+// import type { ResolvedSSROptions, SSROptions } from "./ssr";
 import type { PackageCache } from "./packages";
 import { findNearestPackageData } from "./packages";
 import { resolveSSROptions } from "./ssr";
@@ -858,23 +858,23 @@ export async function resolveConfig(
     };
 
     //解析插件
-    const resolvedWorkerPlugins = await resolvePlugins(
-      workerResolved,
-      workerPrePlugins,
-      workerNormalPlugins,
-      workerPostPlugins
-    );
+    // const resolvedWorkerPlugins = await resolvePlugins(
+    //   workerResolved,
+    //   workerPrePlugins,
+    //   workerNormalPlugins,
+    //   workerPostPlugins
+    // );
 
     //使用 createPluginHookUtils 创建插件钩子工具。
     //获取并排序 configResolved 钩子，并运行这些钩子
-    await Promise.all(
-      createPluginHookUtils(resolvedWorkerPlugins)
-        .getSortedPluginHooks("configResolved")
-        .map((hook) => hook(workerResolved))
-    );
+    // await Promise.all(
+    //   createPluginHookUtils(resolvedWorkerPlugins)
+    //     .getSortedPluginHooks("configResolved")
+    //     .map((hook) => hook(workerResolved))
+    // );
 
-    //返回解析后的 worker 插件
-    return resolvedWorkerPlugins;
+    // //返回解析后的 worker 插件
+    // return resolvedWorkerPlugins;
   };
 
   const resolvedWorkerOptions: ResolvedWorkerOptions = {
@@ -906,7 +906,7 @@ export async function resolveConfig(
     bundleChain: [], //捆绑链，初始为空数组。
     isProduction,
     plugins: userPlugins, //用户定义的插件
-    css: resolveCSSOptions(config.css), //解析后的 CSS 选项
+    // css: resolveCSSOptions(config.css), //解析后的 CSS 选项
 
     //如果 config.esbuild 为 false，则设置为 false；否则，合并 config.esbuild 和一些默认选项
     esbuild:
@@ -918,7 +918,7 @@ export async function resolveConfig(
           },
     server, //服务器选项
     build: resolvedBuildOptions, //解析后的构建选项
-    preview: resolvePreviewOptions(config.preview, server), // 解析后的预览选项
+    // preview: resolvePreviewOptions(config.preview, server), // 解析后的预览选项
     envDir, //环境变量目录
 
     // 环境变量，包括基础 URL、模式、开发和生产标志
@@ -968,12 +968,12 @@ export async function resolveConfig(
     ...resolved,
   };
   //解析插件
-  (resolved.plugins as Plugin[]) = await resolvePlugins(
-    resolved,
-    prePlugins,
-    normalPlugins,
-    postPlugins
-  );
+  // (resolved.plugins as Plugin[]) = await resolvePlugins(
+  //   resolved,
+  //   prePlugins,
+  //   normalPlugins,
+  //   postPlugins
+  // );
   //合并插件钩子工具到 resolved 对象
   Object.assign(resolved, createPluginHookUtils(resolved.plugins));
 
