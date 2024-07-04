@@ -31,6 +31,7 @@ import {
   loopbackHosts,
   wildcardHosts,
 } from "./constants";
+import type { PreviewServer } from "./preview";
 
 /**
  * Inlined to keep `@rollup/pluginutils` in devDependencies
@@ -751,4 +752,46 @@ export function isFileReadable(filename: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * 用于比较旧的和新的服务器 URL 是否相同
+ * 如果 URL 或 DNS 顺序发生变化，它返回 true；否则返回 false
+ * @param oldUrls
+ * @param newUrls
+ * @returns
+ */
+export function diffDnsOrderChange(
+  oldUrls: ViteDevServer["resolvedUrls"],
+  newUrls: ViteDevServer["resolvedUrls"]
+): boolean {
+  return !(
+    oldUrls === newUrls ||
+    (oldUrls &&
+      newUrls &&
+      arrayEqual(oldUrls.local, newUrls.local) &&
+      arrayEqual(oldUrls.network, newUrls.network))
+  );
+}
+
+/**
+ * 比较两个数组是否相等
+ * 如果两个数组在引用、长度和每个元素上都相等，返回 true；否则返回 false
+ * @param a
+ * @param b
+ * @returns
+ */
+export function arrayEqual(a: any[], b: any[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+export function isDevServer(
+  server: ViteDevServer | PreviewServer
+): server is ViteDevServer {
+  return "pluginContainer" in server;
 }

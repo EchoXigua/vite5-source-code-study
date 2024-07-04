@@ -638,6 +638,8 @@ export async function resolveConfig(
     //加载指定模式下的环境变量文件
     loadEnv(mode, envDir, resolveEnvPrefix(config));
 
+  console.log("env", userEnv);
+
   /**
    * 主要处理的是根据 .env 文件中配置的 NODE_ENV 设置来决定当前的 Node.js 环境变量 process.env.NODE_ENV
    * 它会根据用户配置的环境变量来决定是否将 process.env.NODE_ENV 设置为 development，并且会在特定情况下发出警告

@@ -48,7 +48,7 @@ import {
 } from "../watch";
 import { CLIENT_DIR, DEFAULT_DEV_PORT } from "../constants";
 import {
-  // diffDnsOrderChange,
+  diffDnsOrderChange,
   isInNodeModules,
   isObject,
   isParentDirectory,
@@ -70,8 +70,8 @@ import { ERR_CLOSED_SERVER, createPluginContainer } from "./pluginContainer";
 import { openBrowser as _openBrowser } from "./openBrowser";
 // import { getDepsOptimizer, initDepsOptimizer } from "../optimizer";
 import { printServerUrls } from "../logger";
-// import { bindCLIShortcuts } from "../shortcuts";
-// import type { BindCLIShortcutsOptions } from "../shortcuts";
+import { bindCLIShortcuts } from "../shortcuts";
+import type { BindCLIShortcutsOptions } from "../shortcuts";
 // import { getFsUtils } from "../fsUtils";
 
 //中间件的处理
@@ -1517,4 +1517,42 @@ export function resolveServerOptions(
 
 function resolvedAllowDir(root: string, dir: string): string {
   return normalizePath(path.resolve(root, dir));
+}
+
+/**
+ * 用于重新启动 Vite 开发服务器，并在某些条件下打印新的服务器 URL
+ * @param server
+ * @returns
+ */
+export async function restartServerWithUrls(
+  server: ViteDevServer
+): Promise<void> {
+  if (server.config.server.middlewareMode) {
+    // 如果是中间件模式，直接重启服务器并返回
+    await server.restart();
+    return;
+  }
+
+  // 保存重启前的端口、主机、已解析的url，以便在重启后比较
+  const { port: prevPort, host: prevHost } = server.config.server;
+  const prevUrls = server.resolvedUrls;
+
+  await server.restart();
+
+  // 获取重启后的配置
+  const {
+    logger,
+    server: { port, host },
+  } = server.config;
+
+  // 端口是否发生变化、主机是否发生变化、解析的 URL 顺序是否发生变化
+  if (
+    (port ?? DEFAULT_DEV_PORT) !== (prevPort ?? DEFAULT_DEV_PORT) ||
+    host !== prevHost ||
+    diffDnsOrderChange(prevUrls, server.resolvedUrls)
+  ) {
+    // 如果任一条件满足，则打印新的服务器 URL
+    logger.info("");
+    server.printUrls();
+  }
 }

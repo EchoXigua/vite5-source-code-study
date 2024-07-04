@@ -183,8 +183,6 @@ cli
 
       console.log("server", server);
 
-      return;
-
       //启动服务器
       await server.listen();
 
@@ -260,8 +258,6 @@ cli
       process.exit(1);
     }
 
-    try {
-    } catch (e) {}
     console.log("root", root);
     console.log("options", options);
   });
