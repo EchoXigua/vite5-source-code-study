@@ -83,11 +83,11 @@ import type { BindCLIShortcutsOptions } from "../shortcuts";
 // } from "./middlewares/transform";
 // import { proxyMiddleware } from "./middlewares/proxy";
 // import { baseMiddleware } from "./middlewares/base";
-// import {
-//   servePublicMiddleware,
-//   serveRawFsMiddleware,
-//   serveStaticMiddleware,
-// } from "./middlewares/static";
+import {
+  servePublicMiddleware,
+  serveRawFsMiddleware,
+  serveStaticMiddleware,
+} from "./middlewares/static";
 // import { htmlFallbackMiddleware } from "./middlewares/htmlFallback";
 // import {
 //   createDevHtmlTransformFn,
@@ -1040,8 +1040,8 @@ export async function _createServer(
   // middlewares.use(transformMiddleware(server));
 
   // 提供静态文件服务
-  // middlewares.use(serveRawFsMiddleware(server));
-  // middlewares.use(serveStaticMiddleware(server));
+  middlewares.use(serveRawFsMiddleware(server));
+  middlewares.use(serveStaticMiddleware(server));
 
   // html 回退，为单页应用（SPA）或多页应用（MPA）提供 HTML 回退功能
   if (config.appType === "spa" || config.appType === "mpa") {

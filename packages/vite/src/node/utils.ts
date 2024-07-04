@@ -13,7 +13,7 @@ import { createFilter as _createFilter } from "@rollup/pluginutils";
 
 import type { Alias, AliasOptions } from "dep-types/alias";
 
-import { isWindows, slash, withTrailingSlash } from "../shared/utils";
+import { cleanUrl, isWindows, slash, withTrailingSlash } from "../shared/utils";
 import {
   type PackageCache,
   findNearestPackageData,
@@ -22,11 +22,12 @@ import {
 import type { CommonServerOptions } from ".";
 import type { ResolvedConfig } from "./config";
 import type { ResolvedServerUrls, ViteDevServer } from "./server";
+import { VALID_ID_PREFIX } from "../shared/constants";
 import {
   CLIENT_ENTRY,
-  // CLIENT_PUBLIC_PATH,
-  // ENV_PUBLIC_PATH,
-  // FS_PREFIX,
+  CLIENT_PUBLIC_PATH,
+  ENV_PUBLIC_PATH,
+  FS_PREFIX,
   // OPTIMIZABLE_ENTRY_RE,
   loopbackHosts,
   wildcardHosts,
@@ -795,3 +796,60 @@ export function isDevServer(
 ): server is ViteDevServer {
   return "pluginContainer" in server;
 }
+
+// 用于匹配 Windows 文件路径的卷标部分（如 "C:" 或 "D:"） i 忽略大小写
+const VOLUME_RE = /^[A-Z]:/i;
+
+/**
+ * 用于将路径标识符或 URL 转换为文件系统路径
+ * @param id 路径标识符
+ * @returns
+ */
+export function fsPathFromId(id: string): string {
+  const fsPath = normalizePath(
+    // 如果以特定前缀（FS_PREFIX）开头则去掉，否则保持原样
+    id.startsWith(FS_PREFIX) ? id.slice(FS_PREFIX.length) : id
+  );
+  // 如果规范化后的路径以 / 开头，或者匹配卷标的正则表达式 VOLUME_RE（即是 Windows 文件路径），则返回该路径
+  // 否则，在路径前加上 /，使其成为绝对路径
+  return fsPath[0] === "/" || VOLUME_RE.test(fsPath) ? fsPath : `/${fsPath}`;
+}
+
+export function fsPathFromUrl(url: string): string {
+  return fsPathFromId(cleanUrl(url));
+}
+
+/**
+ * 用于检查两个文件名是否相同。
+ * 该函数的功能是比较两个标准化的绝对路径，以确定它们是否指向同一个文件
+ *
+ * @param file1 - normalized absolute path
+ * @param file2 - normalized absolute path
+ * @returns true if both files url are identical
+ */
+export function isSameFileUri(file1: string, file2: string): boolean {
+  return (
+    file1 === file2 ||
+    (isCaseInsensitiveFS && file1.toLowerCase() === file2.toLowerCase())
+  );
+}
+
+/**
+ * 去掉/ 开头
+ * @param str
+ * @returns
+ */
+export function removeLeadingSlash(str: string): string {
+  return str[0] === "/" ? str.slice(1) : str;
+}
+
+const internalPrefixes = [
+  FS_PREFIX,
+  VALID_ID_PREFIX,
+  CLIENT_PUBLIC_PATH,
+  ENV_PUBLIC_PATH,
+];
+const InternalPrefixRE = new RegExp(`^(?:${internalPrefixes.join("|")})`);
+/** 用于匹配内部请求 */
+export const isInternalRequest = (url: string): boolean =>
+  InternalPrefixRE.test(url);

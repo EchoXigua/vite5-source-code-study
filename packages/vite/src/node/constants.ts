@@ -63,6 +63,9 @@ export const CLIENT_DIR = path.dirname(CLIENT_ENTRY);
 //因此，需要一个前缀来标识和转换这些路径，以确保它们可以在 Web 环境中正确使用。
 export const FS_PREFIX = `/@fs/`;
 
+export const ENV_PUBLIC_PATH = `/@vite/env`;
+export const CLIENT_PUBLIC_PATH = `/@vite/client`;
+
 export const DEFAULT_DEV_PORT = 5173;
 
 export const DEFAULT_PREVIEW_PORT = 4173;

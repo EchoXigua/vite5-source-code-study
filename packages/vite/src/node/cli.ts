@@ -6,7 +6,7 @@ import { VERSION } from "./constants";
 // import type { ServerOptions } from "./server";
 import type { LogLevel } from "./logger";
 import { createLogger } from "./logger";
-// import type { CLIShortcut } from "./shortcuts";
+import type { CLIShortcut } from "./shortcuts";
 
 const cli = cac("vite");
 
@@ -180,8 +180,6 @@ cli
         //确保 server.httpServer 存在，如果不存在则抛出错误
         throw new Error("HTTP server not available");
       }
-
-      console.log("server", server);
 
       //启动服务器
       await server.listen();
