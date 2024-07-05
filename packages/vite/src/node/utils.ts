@@ -853,3 +853,6 @@ const InternalPrefixRE = new RegExp(`^(?:${internalPrefixes.join("|")})`);
 /** 用于匹配内部请求 */
 export const isInternalRequest = (url: string): boolean =>
   InternalPrefixRE.test(url);
+
+export const isImportRequest = (url: string): boolean =>
+  importQueryRE.test(url);

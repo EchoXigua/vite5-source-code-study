@@ -84,6 +84,9 @@ importers:
       connect:
         specifier: ^3.7.0
         version: 3.7.0
+      convert-source-map:
+        specifier: ^2.0.0
+        version: 2.0.0
       cors:
         specifier: ^2.8.5
         version: 2.8.5
@@ -745,6 +748,10 @@ packages:
       utils-merge: 1.0.1
     transitivePeerDependencies:
       - supports-color
+    dev: true
+
+  /convert-source-map@2.0.0:
+    resolution: {integrity: sha512-Kvp459HrV2FEJ1CAsi1Ku+MY3kasH19TFykTz2xWmMeq6bk2NU3XXvfJ+Q61m0xktWwt+1HSYf3JZsTms3aRJg==}
     dev: true
 
   /cors@2.8.5:

@@ -10,9 +10,11 @@ import {
   fsPathFromId,
   fsPathFromUrl,
   isFileReadable,
+  isImportRequest,
   isInternalRequest,
   isParentDirectory,
   isSameFileUri,
+  normalizePath,
   removeLeadingSlash,
 } from "../../utils";
 import {
@@ -21,6 +23,8 @@ import {
   slash,
   withTrailingSlash,
 } from "../../../shared/utils";
+
+const knownJavascriptExtensionRE = /\.[tj]sx?$/;
 
 const sirvOptions = ({
   getHeaders,
@@ -49,6 +53,62 @@ const sirvOptions = ({
     },
   };
 };
+
+/**
+ * 用于处理 Vite 开发服务器上公共目录的中间件
+ * @param server
+ * 一个包含已知公共文件路径的 Set 集合。该集合用于提高性能，避免每次请求都检查文件系统
+ * @param publicFiles
+ * @returns
+ */
+export function servePublicMiddleware(
+  server: ViteDevServer,
+  publicFiles?: Set<string>
+): Connect.NextHandleFunction {
+  const dir = server.config.publicDir;
+  const serve = sirv(
+    dir,
+    sirvOptions({
+      getHeaders: () => server.config.server.headers,
+    })
+  );
+
+  // 用于将请求的 URL 转换为文件路径
+  const toFilePath = (url: string) => {
+    let filePath = cleanUrl(url);
+    // 如果 URL 包含百分号编码（%），尝试解码它
+    if (filePath.indexOf("%") !== -1) {
+      try {
+        filePath = decodeURI(filePath);
+      } catch (err) {
+        /* malform uri */
+      }
+    }
+    return normalizePath(filePath);
+  };
+
+  return function viteServePublicMiddleware(req, res, next) {
+    // 这是实际的中间件函数，它被返回并用于处理请求
+    /**
+     * 为了避免' existsSync '对每个请求的性能影响，我们检查内存中已知的公共文件集。
+     * 该集合在重启时更新。也要跳过导入请求和内部请求' /@fs/ /@vite-client '等…
+     */
+    if (
+      // 检查 publicFiles 集合是否存在，并且请求的文件路径是否在该集合中。如果不在集合中，则调用 next() 跳过此中间件
+      (publicFiles && !publicFiles.has(toFilePath(req.url!))) ||
+      // 检查请求是否为导入请求（isImportRequest）
+      isImportRequest(req.url!) ||
+      // 是否为内部请求
+      isInternalRequest(req.url!)
+    ) {
+      // 如果是，则调用 next() 跳过此中间件
+      return next();
+    }
+
+    // 调用 serve 函数处理请求，提供 publicDir 目录中的静态文件
+    serve(req, res, next);
+  };
+}
 
 /**
  * 用于在 Vite 开发服务器中提供静态文件服务。

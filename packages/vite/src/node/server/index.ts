@@ -89,10 +89,10 @@ import {
   serveStaticMiddleware,
 } from "./middlewares/static";
 // import { htmlFallbackMiddleware } from "./middlewares/htmlFallback";
-// import {
-//   createDevHtmlTransformFn,
-//   indexHtmlMiddleware,
-// } from "./middlewares/indexHtml";
+import {
+  // createDevHtmlTransformFn,
+  indexHtmlMiddleware,
+} from "./middlewares/indexHtml";
 // import { notFoundMiddleware } from "./middlewares/notFound";
 import type { CommonServerOptions } from "../http";
 
@@ -414,6 +414,8 @@ export async function _createServer(
 ): Promise<ViteDevServer> {
   //返回一个解析后的配置
   const config = await resolveConfig(inlineConfig, "serve");
+
+  console.log();
 
   //初始化公共文件，返回一个 Promise 对象 initPublicFilesPromise。
   const initPublicFilesPromise = initPublicFiles(config);
@@ -1033,7 +1035,7 @@ export async function _createServer(
   // 在 /public 目录下提供静态文件服务
   // 这适用于转换中间件之前，这样这些文件就可以按原样提供而不需要转换。
   if (publicDir) {
-    // middlewares.use(servePublicMiddleware(server, publicFiles));
+    middlewares.use(servePublicMiddleware(server, publicFiles));
   }
 
   // 主要的文件转换中间件
@@ -1058,9 +1060,9 @@ export async function _createServer(
   //对于单页应用（SPA）或多页应用（MPA），提供 index.html 的转换和 404 错误处理。
   if (config.appType === "spa" || config.appType === "mpa") {
     // transform index.html
-    // middlewares.use(indexHtmlMiddleware(root, server));
+    middlewares.use(indexHtmlMiddleware(root, server));
     // handle 404s
-    // middlewares.use(notFoundMiddleware());
+    middlewares.use(notFoundMiddleware());
   }
 
   // 处理服务器中的一般错误，该中间件可以在请求处理过程中捕获到的任何错误，并进行适当的处理和记录
