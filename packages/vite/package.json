@@ -44,13 +44,16 @@
     "escape-html": "^1.0.3",
     "etag": "^1.8.1",
     "fast-glob": "^3.3.2",
+    "http-proxy": "^1.18.1",
     "launch-editor-middleware": "^2.6.1",
     "lightningcss": "^1.25.0",
     "magic-string": "^0.30.10",
     "open": "^8.4.2",
+    "parse5": "^7.1.2",
     "picocolors": "^1.0.1",
     "picomatch": "^2.3.1",
     "sirv": "^2.0.4",
+    "strip-literal": "^2.1.0",
     "tslib": "^2.6.3",
     "ws": "^8.17.0"
   }

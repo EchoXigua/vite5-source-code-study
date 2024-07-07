@@ -711,18 +711,27 @@ export function createDebugger(
   }
 }
 
+/**
+ * 目的是测试当前文件系统是否是区分大小写的
+ * @returns
+ */
 function testCaseInsensitiveFS() {
+  // 检查 CLIENT_ENTRY 是否以 "client.mjs" 结尾
   if (!CLIENT_ENTRY.endsWith("client.mjs")) {
     throw new Error(
       `cannot test case insensitive FS, CLIENT_ENTRY const doesn't contain client.mjs`
     );
   }
+  // 检查 CLIENT_ENTRY 指向的文件是否存在
   if (!fs.existsSync(CLIENT_ENTRY)) {
     throw new Error(
       "cannot test case insensitive FS, CLIENT_ENTRY does not point to an existing file: " +
         CLIENT_ENTRY
     );
   }
+  // 测试文件系统是否区分大小写
+  // 替换 CLIENT_ENTRY 中的 "client.mjs" 为 "cLiEnT.mjs"，然后再次使用 fs.existsSync 检查文件是否存在。
+  // 如果存在，说明文件系统不区分大小写，返回 true；否则，返回 false。
   return fs.existsSync(CLIENT_ENTRY.replace("client.mjs", "cLiEnT.mjs"));
 }
 
@@ -802,6 +811,7 @@ const VOLUME_RE = /^[A-Z]:/i;
 
 /**
  * 用于将路径标识符或 URL 转换为文件系统路径
+ * 主要就是去除掉 FS_PREFIX 开头的前缀
  * @param id 路径标识符
  * @returns
  */
@@ -856,3 +866,7 @@ export const isInternalRequest = (url: string): boolean =>
 
 export const isImportRequest = (url: string): boolean =>
   importQueryRE.test(url);
+
+export function unique<T>(arr: T[]): T[] {
+  return Array.from(new Set(arr));
+}

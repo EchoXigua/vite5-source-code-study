@@ -81,7 +81,7 @@ import type { BindCLIShortcutsOptions } from "../shortcuts";
 //   cachedTransformMiddleware,
 //   transformMiddleware,
 // } from "./middlewares/transform";
-// import { proxyMiddleware } from "./middlewares/proxy";
+import { proxyMiddleware } from "./middlewares/proxy";
 // import { baseMiddleware } from "./middlewares/base";
 import {
   servePublicMiddleware,
@@ -90,10 +90,10 @@ import {
 } from "./middlewares/static";
 // import { htmlFallbackMiddleware } from "./middlewares/htmlFallback";
 import {
-  // createDevHtmlTransformFn,
+  createDevHtmlTransformFn,
   indexHtmlMiddleware,
 } from "./middlewares/indexHtml";
-// import { notFoundMiddleware } from "./middlewares/notFound";
+import { notFoundMiddleware } from "./middlewares/notFound";
 import type { CommonServerOptions } from "../http";
 
 import { searchForWorkspaceRoot } from "./searchRoot";
@@ -512,7 +512,7 @@ export async function _createServer(
   let exitProcess: () => void;
 
   //创建开发环境下的 HTML 转换函数：
-  // const devHtmlTransformFn = createDevHtmlTransformFn(config);
+  const devHtmlTransformFn = createDevHtmlTransformFn(config);
 
   //用于存储在爬取结束时需要执行的回调函数
   const onCrawlEndCallbacks: (() => void)[] = [];
@@ -1002,7 +1002,7 @@ export async function _createServer(
   if (proxy) {
     const middlewareServer =
       (isObject(middlewareMode) ? middlewareMode.server : null) || httpServer;
-    // middlewares.use(proxyMiddleware(middlewareServer, proxy, config));
+    middlewares.use(proxyMiddleware(middlewareServer, proxy, config));
   }
 
   // 基础路径

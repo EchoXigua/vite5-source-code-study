@@ -6,7 +6,7 @@ import {
   // isInNodeModules,
   normalizePath,
   safeRealpathSync,
-  // tryStatSync,
+  tryStatSync,
 } from "./utils";
 
 export interface FsUtils {
@@ -34,9 +34,9 @@ export const commonFsUtils: FsUtils = {
   existsSync: fs.existsSync,
   isDirectory,
 
-  tryResolveRealFile,
-  tryResolveRealFileWithExtensions,
-  tryResolveRealFileOrType,
+  // tryResolveRealFile,
+  // tryResolveRealFileWithExtensions,
+  // tryResolveRealFileOrType,
 };
 
 const cachedFsUtilsMap = new WeakMap<ResolvedConfig, FsUtils>();
@@ -59,7 +59,7 @@ export function getFsUtils(config: ResolvedConfig): FsUtils {
     ) {
       fsUtils = commonFsUtils;
     } else {
-      fsUtils = createCachedFsUtils(config);
+      // fsUtils = createCachedFsUtils(config);
     }
     cachedFsUtilsMap.set(config, fsUtils);
   }
@@ -71,4 +71,9 @@ function getRealPath(resolved: string, preserveSymlinks?: boolean): string {
     resolved = safeRealpathSync(resolved);
   }
   return normalizePath(resolved);
+}
+
+function isDirectory(path: string): boolean {
+  const stat = tryStatSync(path);
+  return stat?.isDirectory() ?? false;
 }

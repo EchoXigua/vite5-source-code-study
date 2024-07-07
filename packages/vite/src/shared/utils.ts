@@ -3,6 +3,12 @@ import { NULL_BYTE_PLACEHOLDER, VALID_ID_PREFIX } from "./constants";
 export const isWindows =
   typeof process !== "undefined" && process.platform === "win32";
 
+export function wrapId(id: string): string {
+  return id.startsWith(VALID_ID_PREFIX)
+    ? id
+    : VALID_ID_PREFIX + id.replace("\0", NULL_BYTE_PLACEHOLDER);
+}
+
 const windowsSlashRE = /\\/g;
 export function slash(p: string): string {
   return p.replace(windowsSlashRE, "/");
