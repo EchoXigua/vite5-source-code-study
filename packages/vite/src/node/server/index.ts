@@ -659,7 +659,8 @@ export async function _createServer(
               {
                 //设置请求头
                 headers: {
-                  //允许服务器使用历史中间件重定向到 /index.html。
+                  // 允许服务器使用历史中间件重定向到 /index.html, 这里主要解决历史模式下，刷新404的问题
+                  // 刷新页面或直接访问子路由时能正确地返回主页面（即 index.html）
                   Accept: "text/html",
                 },
               },
