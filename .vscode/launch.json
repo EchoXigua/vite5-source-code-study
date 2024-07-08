@@ -15,7 +15,8 @@
             "runtimeArgs": ["tsx"],
             "args": ["${workspaceFolder}\\packages\\vite\\src\\node\\cli.ts"],
             // 指定当前工作目录，通常是 ${workspaceFolder}，即项目的根目录
-            "cwd": "${workspaceFolder}",
+            // "cwd": "${workspaceFolder}",
+            "cwd":"C:/Users/DXM-0965/Desktop/学习/github_repo/vite5-source-code-study",
             "skipFiles": [
                 "<node_internals>/**"
             ],

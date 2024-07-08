@@ -87,6 +87,7 @@ export function resolveChokidarOptions(
 
   //初始化 ignored 列表，默认忽略以下目录：
   const ignored: WatchOptions["ignored"] = [
+    "C:/DumpStack.log.tmp",
     "**/.git/**",
     "**/node_modules/**",
     "**/test-results/**", // Playwright

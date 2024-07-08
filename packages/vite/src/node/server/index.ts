@@ -72,7 +72,7 @@ import { openBrowser as _openBrowser } from "./openBrowser";
 import { printServerUrls } from "../logger";
 import { bindCLIShortcuts } from "../shortcuts";
 import type { BindCLIShortcutsOptions } from "../shortcuts";
-// import { getFsUtils } from "../fsUtils";
+import { getFsUtils } from "../fsUtils";
 
 //中间件的处理
 // import { errorMiddleware, prepareError } from "./middlewares/error.ts";
@@ -81,14 +81,14 @@ import type { BindCLIShortcutsOptions } from "../shortcuts";
 //   cachedTransformMiddleware,
 //   transformMiddleware,
 // } from "./middlewares/transform";
-import { proxyMiddleware } from "./middlewares/proxy";
+// import { proxyMiddleware } from "./middlewares/proxy";
 // import { baseMiddleware } from "./middlewares/base";
 import {
   servePublicMiddleware,
   serveRawFsMiddleware,
   serveStaticMiddleware,
 } from "./middlewares/static";
-// import { htmlFallbackMiddleware } from "./middlewares/htmlFallback";
+import { htmlFallbackMiddleware } from "./middlewares/htmlFallback";
 import {
   createDevHtmlTransformFn,
   indexHtmlMiddleware,
@@ -480,24 +480,25 @@ export async function _createServer(
   // eslint-disable-next-line eqeqeq
   //根据 serverConfig.watch 的值来决定是否启用文件监视器，并创建相应的监视器对象
   const watchEnabled = serverConfig.watch !== null;
-  const watcher = watchEnabled
-    ? (chokidar.watch(
-        //创建一个 chokidar 的文件监视器对象
-        // 配置文件依赖项和env文件可能在根目录之外
-        [
-          //数组中包含了需要监视的路径：
-          //根目录 、配置文件依赖、环境文件、公共文件目录（如果存在）
-          root,
-          ...config.configFileDependencies,
-          ...getEnvFilesForMode(config.mode, config.envDir),
-          //显式地监视公共目录，因为它可能位于根目录之外。
-          ...(publicDir && publicFiles ? [publicDir] : []),
-        ],
-        resolvedWatchOptions
-      ) as FSWatcher)
-    : //createNoopWatcher 是一个函数，用于创建一个空的监视器对象或者一个不执行任何操作的监视器对象
-      //根据 resolvedWatchOptions 的设置来决定其行为。
-      createNoopWatcher(resolvedWatchOptions);
+  const watcher =
+    watchEnabled && false
+      ? (chokidar.watch(
+          //创建一个 chokidar 的文件监视器对象
+          // 配置文件依赖项和env文件可能在根目录之外
+          [
+            //数组中包含了需要监视的路径：
+            //根目录 、配置文件依赖、环境文件、公共文件目录（如果存在）
+            root,
+            ...config.configFileDependencies,
+            ...getEnvFilesForMode(config.mode, config.envDir),
+            //显式地监视公共目录，因为它可能位于根目录之外。
+            ...(publicDir && publicFiles ? [publicDir] : []),
+          ],
+          resolvedWatchOptions
+        ) as FSWatcher)
+      : //createNoopWatcher 是一个函数，用于创建一个空的监视器对象或者一个不执行任何操作的监视器对象
+        //根据 resolvedWatchOptions 的设置来决定其行为。
+        createNoopWatcher(resolvedWatchOptions);
 
   const moduleGraph: ModuleGraph = new ModuleGraph((url, ssr) =>
     container.resolveId(url, undefined, { ssr })
@@ -1001,9 +1002,9 @@ export async function _createServer(
   // 配置代理
   const { proxy } = serverConfig;
   if (proxy) {
-    const middlewareServer =
-      (isObject(middlewareMode) ? middlewareMode.server : null) || httpServer;
-    middlewares.use(proxyMiddleware(middlewareServer, proxy, config));
+    // const middlewareServer =
+    //   (isObject(middlewareMode) ? middlewareMode.server : null) || httpServer;
+    // middlewares.use(proxyMiddleware(middlewareServer, proxy, config));
   }
 
   // 基础路径
@@ -1048,9 +1049,10 @@ export async function _createServer(
 
   // html 回退，为单页应用（SPA）或多页应用（MPA）提供 HTML 回退功能
   if (config.appType === "spa" || config.appType === "mpa") {
-    // middlewares.use(
-    //   htmlFallbackMiddleware(root, config.appType === "spa", getFsUtils(config))
-    // );
+    // 这一步的中间件关键，经过这个中间件处理后，后一个中间件 indexHtmlMiddleware 才能去处理根目录下面的index.html
+    middlewares.use(
+      htmlFallbackMiddleware(root, config.appType === "spa", getFsUtils(config))
+    );
   }
 
   /**

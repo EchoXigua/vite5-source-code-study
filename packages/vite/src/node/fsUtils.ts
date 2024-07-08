@@ -41,7 +41,10 @@ export const commonFsUtils: FsUtils = {
 
 const cachedFsUtilsMap = new WeakMap<ResolvedConfig, FsUtils>();
 export function getFsUtils(config: ResolvedConfig): FsUtils {
-  let fsUtils = cachedFsUtilsMap.get(config);
+  let fsUtils = cachedFsUtilsMap.get(config) || {
+    existsSync: fs.existsSync,
+    isDirectory,
+  };
   if (!fsUtils) {
     if (
       config.command !== "serve" ||
@@ -63,6 +66,7 @@ export function getFsUtils(config: ResolvedConfig): FsUtils {
     }
     cachedFsUtilsMap.set(config, fsUtils);
   }
+
   return fsUtils;
 }
 
