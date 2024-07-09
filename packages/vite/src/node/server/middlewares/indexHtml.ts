@@ -576,8 +576,6 @@ export function indexHtmlMiddleware(
         filePath = path.join(root, decodeURIComponent(url));
       }
 
-      console.log("fsUtils", fsUtils);
-
       // 检查文件是否存在并读取内容
       if (fsUtils.existsSync(filePath)) {
         // 根据模式的不同，选择的不同的请求头
@@ -588,8 +586,6 @@ export function indexHtmlMiddleware(
         try {
           // 读取文件内容
           let html = await fsp.readFile(filePath, "utf-8");
-          console.log("html", html);
-
           if (isDev) {
             // 开发模式下 调用transformIndexHtml 转换html 内容
             html = await server.transformIndexHtml(url, html, req.originalUrl);

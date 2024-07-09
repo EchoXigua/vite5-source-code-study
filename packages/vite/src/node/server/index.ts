@@ -415,8 +415,6 @@ export async function _createServer(
   //返回一个解析后的配置
   const config = await resolveConfig(inlineConfig, "serve");
 
-  console.log();
-
   //初始化公共文件，返回一个 Promise 对象 initPublicFilesPromise。
   const initPublicFilesPromise = initPublicFiles(config);
 
@@ -480,25 +478,24 @@ export async function _createServer(
   // eslint-disable-next-line eqeqeq
   //根据 serverConfig.watch 的值来决定是否启用文件监视器，并创建相应的监视器对象
   const watchEnabled = serverConfig.watch !== null;
-  const watcher =
-    watchEnabled && false
-      ? (chokidar.watch(
-          //创建一个 chokidar 的文件监视器对象
-          // 配置文件依赖项和env文件可能在根目录之外
-          [
-            //数组中包含了需要监视的路径：
-            //根目录 、配置文件依赖、环境文件、公共文件目录（如果存在）
-            root,
-            ...config.configFileDependencies,
-            ...getEnvFilesForMode(config.mode, config.envDir),
-            //显式地监视公共目录，因为它可能位于根目录之外。
-            ...(publicDir && publicFiles ? [publicDir] : []),
-          ],
-          resolvedWatchOptions
-        ) as FSWatcher)
-      : //createNoopWatcher 是一个函数，用于创建一个空的监视器对象或者一个不执行任何操作的监视器对象
-        //根据 resolvedWatchOptions 的设置来决定其行为。
-        createNoopWatcher(resolvedWatchOptions);
+  const watcher = watchEnabled
+    ? (chokidar.watch(
+        //创建一个 chokidar 的文件监视器对象
+        // 配置文件依赖项和env文件可能在根目录之外
+        [
+          //数组中包含了需要监视的路径：
+          //根目录 、配置文件依赖、环境文件、公共文件目录（如果存在）
+          root,
+          ...config.configFileDependencies,
+          ...getEnvFilesForMode(config.mode, config.envDir),
+          //显式地监视公共目录，因为它可能位于根目录之外。
+          ...(publicDir && publicFiles ? [publicDir] : []),
+        ],
+        resolvedWatchOptions
+      ) as FSWatcher)
+    : //createNoopWatcher 是一个函数，用于创建一个空的监视器对象或者一个不执行任何操作的监视器对象
+      //根据 resolvedWatchOptions 的设置来决定其行为。
+      createNoopWatcher(resolvedWatchOptions);
 
   const moduleGraph: ModuleGraph = new ModuleGraph((url, ssr) =>
     container.resolveId(url, undefined, { ssr })

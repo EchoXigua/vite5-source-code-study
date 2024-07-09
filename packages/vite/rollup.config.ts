@@ -353,7 +353,6 @@ function shimDepsPlugin(deps: Record<string, ShimOptions>): Plugin {
               this.error(
                 `Could not find expected src "${src}" in file "${file}"`
               );
-              console.log(123);
 
               transformed[file] = true;
               //用 MagicString 类的 overwrite 方法将其替换为指定的 replacement。

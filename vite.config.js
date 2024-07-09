@@ -6,7 +6,6 @@ export default {
   root: "./",
   server: {
     open: true,
-    ignored: ["C:/DumpStack.log.tmp", "**/node_modules/**"],
   },
 };
 
