@@ -2,12 +2,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { exec } from "node:child_process";
+import { createHash } from "node:crypto";
 import { URL, fileURLToPath } from "node:url";
 import { builtinModules, createRequire } from "node:module";
 import fsp from "node:fs/promises";
 import type { AddressInfo, Server } from "node:net";
 import { promises as dns } from "node:dns";
 import debug from "debug";
+import type { FSWatcher } from "chokidar";
 
 import { createFilter as _createFilter } from "@rollup/pluginutils";
 
@@ -869,4 +871,146 @@ export const isImportRequest = (url: string): boolean =>
 
 export function unique<T>(arr: T[]): T[] {
   return Array.from(new Set(arr));
+}
+
+export function joinUrlSegments(a: string, b: string): string {
+  if (!a || !b) {
+    return a || b || "";
+  }
+  if (a[a.length - 1] === "/") {
+    a = a.substring(0, a.length - 1);
+  }
+  if (b[0] !== "/") {
+    b = "/" + b;
+  }
+  return a + b;
+}
+
+export function ensureWatchedFile(
+  watcher: FSWatcher,
+  file: string | null,
+  root: string
+): void {
+  if (
+    file &&
+    // only need to watch if out of root
+    !file.startsWith(withTrailingSlash(root)) &&
+    // some rollup plugins use null bytes for private resolved Ids
+    !file.includes("\0") &&
+    fs.existsSync(file)
+  ) {
+    // resolve file to normalized system path
+    watcher.add(path.resolve(file));
+  }
+}
+
+export function getHash(text: Buffer | string, length = 8): string {
+  const h = createHash("sha256")
+    .update(text)
+    .digest("hex")
+    .substring(0, length);
+  if (length <= 64) return h;
+  return h.padEnd(length, "_");
+}
+
+interface ImageCandidate {
+  url: string;
+  descriptor: string;
+}
+const escapedSpaceCharacters = /( |\\t|\\n|\\f|\\r)+/g;
+const imageSetUrlRE = /^(?:[\w\-]+\(.*?\)|'.*?'|".*?"|\S*)/;
+function joinSrcset(ret: ImageCandidate[]) {
+  return ret
+    .map(({ url, descriptor }) => url + (descriptor ? ` ${descriptor}` : ""))
+    .join(", ");
+}
+
+function splitSrcSetDescriptor(srcs: string): ImageCandidate[] {
+  return splitSrcSet(srcs)
+    .map((s) => {
+      const src = s.replace(escapedSpaceCharacters, " ").trim();
+      const url = imageSetUrlRE.exec(src)?.[0] ?? "";
+
+      return {
+        url,
+        descriptor: src.slice(url.length).trim(),
+      };
+    })
+    .filter(({ url }) => !!url);
+}
+
+export const blankReplacer = (match: string): string =>
+  " ".repeat(match.length);
+const cleanSrcSetRE =
+  /(?:url|image|gradient|cross-fade)\([^)]*\)|"([^"]|(?<=\\)")*"|'([^']|(?<=\\)')*'|data:\w+\/[\w.+\-]+;base64,[\w+/=]+|\?\S+,/g;
+function splitSrcSet(srcs: string) {
+  const parts: string[] = [];
+  /**
+   * There could be a ',' inside of:
+   * - url(data:...)
+   * - linear-gradient(...)
+   * - "data:..."
+   * - data:...
+   * - query parameter ?...
+   */
+  const cleanedSrcs = srcs.replace(cleanSrcSetRE, blankReplacer);
+  let startIndex = 0;
+  let splitIndex: number;
+  do {
+    splitIndex = cleanedSrcs.indexOf(",", startIndex);
+    parts.push(
+      srcs.slice(startIndex, splitIndex !== -1 ? splitIndex : undefined)
+    );
+    startIndex = splitIndex + 1;
+  } while (splitIndex !== -1);
+  return parts;
+}
+
+export function processSrcSetSync(
+  srcs: string,
+  replacer: (arg: ImageCandidate) => string
+): string {
+  return joinSrcset(
+    splitSrcSetDescriptor(srcs).map(({ url, descriptor }) => ({
+      url: replacer({ url, descriptor }),
+      descriptor,
+    }))
+  );
+}
+
+const replacePercentageRE = /%/g;
+export function injectQuery(url: string, queryToInject: string): string {
+  // encode percents for consistent behavior with pathToFileURL
+  // see #2614 for details
+  const resolvedUrl = new URL(
+    url.replace(replacePercentageRE, "%25"),
+    "relative:///"
+  );
+  const { search, hash } = resolvedUrl;
+  let pathname = cleanUrl(url);
+  pathname = isWindows ? slash(pathname) : pathname;
+  return `${pathname}?${queryToInject}${search ? `&` + search.slice(1) : ""}${
+    hash ?? ""
+  }`;
+}
+
+const knownJsSrcRE =
+  /\.(?:[jt]sx?|m[jt]s|vue|marko|svelte|astro|imba|mdx)(?:$|\?)/;
+export const isJSRequest = (url: string): boolean => {
+  url = cleanUrl(url);
+  if (knownJsSrcRE.test(url)) {
+    return true;
+  }
+  if (!path.extname(url) && url[url.length - 1] !== "/") {
+    return true;
+  }
+  return false;
+};
+
+export function stripBase(path: string, base: string): string {
+  if (path === base) {
+    return "/";
+  }
+  const devBase = withTrailingSlash(base);
+  return path.startsWith(devBase) ? path.slice(devBase.length - 1) : path;
 }
