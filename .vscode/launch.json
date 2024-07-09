@@ -24,6 +24,23 @@
             "outFiles": [
                 "${workspaceFolder}/**/*.js"
             ]
-        }
+        },
+        {
+            "name": "vue3 debug",
+            "type": "node",
+            "request": "launch",
+            "runtimeExecutable": "npm",
+            "runtimeArgs": [
+              "run",
+              "dev"
+            ],
+            // "cwd": "${workspaceFolder}",
+            "cwd":"${workspaceFolder}\\packages\\vue-demo",
+            "console": "integratedTerminal",
+            "internalConsoleOptions": "neverOpen",
+            "env": {
+              "NODE_ENV": "development"
+            }
+          },
     ]
 }
