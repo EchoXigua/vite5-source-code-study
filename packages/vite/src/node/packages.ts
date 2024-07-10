@@ -99,6 +99,32 @@ export function resolvePackageData(
   return null;
 }
 
+/**
+ * 用于查找包含 name 字段的最近的 package.json 文件
+ * 这个函数会递归地向上查找，直到找到一个包含 name 字段的 package.json 文件或到达文件系统的根目录为止
+ * @param basedir 查找的起始目录
+ * @param packageCache 缓存已经查找到的包数据
+ * @returns
+ */
+export function findNearestMainPackageData(
+  basedir: string,
+  packageCache?: PackageCache
+): PackageData | null {
+  // 查找最近的 package.json 文件
+  // 包含 dir（目录路径）和 data（解析后的 package.json 数据）的对象
+  const nearestPackage = findNearestPackageData(basedir, packageCache);
+  return (
+    nearestPackage &&
+    (nearestPackage.data.name
+      ? nearestPackage
+      : // 递归调用，继续向上一级目录查找
+        findNearestMainPackageData(
+          path.dirname(nearestPackage.dir),
+          packageCache
+        ))
+  );
+}
+
 export function loadPackageData(pkgPath: string): PackageData {
   const data = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
   const pkgDir = normalizePath(path.dirname(pkgPath));

@@ -36,7 +36,7 @@
             ],
             // "cwd": "${workspaceFolder}",
             "cwd":"${workspaceFolder}\\packages\\vue-demo",
-            "console": "integratedTerminal",
+            // "console": "integratedTerminal",
             "internalConsoleOptions": "neverOpen",
             "env": {
               "NODE_ENV": "development"

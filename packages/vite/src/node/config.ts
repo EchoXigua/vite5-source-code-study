@@ -56,7 +56,7 @@ import {
   // resolvePlugins,
 } from "./plugins";
 // import type { InternalResolveOptions, ResolveOptions } from "./plugins/resolve";
-// import { resolvePlugin, tryNodeResolve } from "./plugins/resolve";
+import { resolvePlugin, tryNodeResolve } from "./plugins/resolve";
 
 // import {
 //   type CSSOptions,

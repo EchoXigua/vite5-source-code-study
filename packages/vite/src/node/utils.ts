@@ -30,11 +30,37 @@ import {
   CLIENT_PUBLIC_PATH,
   ENV_PUBLIC_PATH,
   FS_PREFIX,
-  // OPTIMIZABLE_ENTRY_RE,
+  OPTIMIZABLE_ENTRY_RE,
   loopbackHosts,
   wildcardHosts,
 } from "./constants";
+import type { DepOptimizationConfig } from "./optimizer";
+
 import type { PreviewServer } from "./preview";
+
+/**
+ * 用于匹配所谓的“裸导入”，即没有相对或绝对路径前缀的模块导入。
+ *
+ * (?![a-zA-Z]:)  负向前瞻，确保字符串不以驱动器号（如 C: 或 D:）开头。这通常用于排除 Windows 文件路径
+ * [\w@]   匹配一个单词字符（字母、数字或下划线）或 @ 符号
+ * (?!.*:\/\/)   负向前瞻，确保字符串中不包含 ://（用于排除完整的 URL，如 http:// 或 https://）
+ *  * @example
+ * 匹配 react lodash @babel/core
+ * 不匹配 ./utils C:/path/to/module  http://example.com/module
+ */
+export const bareImportRE = /^(?![a-zA-Z]:)[\w@](?!.*:\/\/)/;
+
+/**
+ * 用于检测深度导入，即模块内部的子路径导入
+ *
+ * @example
+ * ([^@][^/]*)\/  匹配不以 @ 开头并且不包含 / 的字符串后跟一个 /
+ * 例如，匹配 lodash/es 中的 lodash/
+ *
+ * (@[^/]+\/[^/]+)\/  匹配以 @ 开头的作用域包，且后面有两个路径段。
+ * 例如，匹配 @babel/core/lib 中的 @babel/core/
+ */
+export const deepImportRE = /^([^@][^/]*)\/|^(@[^/]+\/[^/]+)\//;
 
 /**
  * Inlined to keep `@rollup/pluginutils` in devDependencies
@@ -122,7 +148,12 @@ const BUN_BUILTIN_NAMESPACE = "bun:";
 //Node.js 内置模块名称不包含 :，因此这一步是为了获取纯粹的 Node.js 内置模块列表
 const nodeBuiltins = builtinModules.filter((id) => !id.includes(":"));
 
-//用于判断给定的模块 ID 是否是内置模块，这里函数考虑了多种运行时环境（Node.js、Deno、Bun）中的内置模块命名空间。
+/**
+ * 用于判断给定的模块 ID 是否是内置模块
+ * 这里函数考虑了多种运行时环境（Node.js、Deno、Bun）中的内置模块命名空间
+ * @param id
+ * @returns
+ */
 export function isBuiltin(id: string): boolean {
   if (process.versions.deno && id.startsWith(NPM_BUILTIN_NAMESPACE))
     //当前运行环境是 Deno，是否以npm: 开头，
@@ -1013,4 +1044,48 @@ export function stripBase(path: string, base: string): string {
   }
   const devBase = withTrailingSlash(base);
   return path.startsWith(devBase) ? path.slice(devBase.length - 1) : path;
+}
+
+/**
+ * 用于从给定的 importPath 中提取 NPM 包的名称
+ * @param importPath
+ * @returns
+ * @example
+ * getNpmPackageName("@scope/package"); // "@scope/package"
+ * getNpmPackageName("package"); // "package"
+ * getNpmPackageName("@scope") // null
+ */
+export function getNpmPackageName(importPath: string): string | null {
+  const parts = importPath.split("/");
+  if (parts[0][0] === "@") {
+    // 检查第一个部分的第一个字符是否为 @，即判断是否为作用域包（如 @scope/package）
+
+    // parts[1] 不存在，即没有包名部分
+    if (!parts[1]) return null;
+
+    // 存在包名部分，返回完整的作用域包名
+    return `${parts[0]}/${parts[1]}`;
+  } else {
+    // 不是作用域包，直接返回第一个部分作为包名
+    return parts[0];
+  }
+}
+
+/**
+ * 用于判断给定的 id 是否可以优化
+ * @param id
+ * @param optimizeDeps
+ * @returns
+ */
+export function isOptimizable(
+  id: string,
+  optimizeDeps: DepOptimizationConfig
+): boolean {
+  const { extensions } = optimizeDeps;
+  return (
+    // 匹配可以优化的文件扩展名
+    OPTIMIZABLE_ENTRY_RE.test(id) ||
+    // 检查 id 是否以 extensions 中的某个扩展名结尾
+    (extensions?.some((ext) => id.endsWith(ext)) ?? false)
+  );
 }
