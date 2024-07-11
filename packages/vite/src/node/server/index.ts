@@ -66,7 +66,7 @@ import { ERR_CLOSED_SERVER, createPluginContainer } from "./pluginContainer";
 // import { ssrFetchModule } from "../ssr/ssrFetchModule";
 // import { ssrFixStacktrace, ssrRewriteStacktrace } from "../ssr/ssrStacktrace";
 
-// import { ERR_OUTDATED_OPTIMIZED_DEP } from "../plugins/optimizedDeps";
+import { ERR_OUTDATED_OPTIMIZED_DEP } from "../plugins/optimizedDeps";
 import { openBrowser as _openBrowser } from "./openBrowser";
 // import { getDepsOptimizer, initDepsOptimizer } from "../optimizer";
 import { printServerUrls } from "../logger";

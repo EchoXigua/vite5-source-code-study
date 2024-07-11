@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import colors from "picocolors";
 import type { PartialResolvedId } from "rollup";
+import { exports, imports } from "resolve.exports";
 
 import type { Plugin } from "../plugin";
 import {
@@ -23,9 +24,13 @@ import {
   isBuiltin,
   isFilePathESM,
   isInNodeModules,
+  isObject,
   isOptimizable,
+  safeRealpathSync,
 } from "../utils";
 import type { DepsOptimizer } from "../optimizer";
+import { commonFsUtils } from "../fsUtils";
+
 import {
   cleanUrl,
   isWindows,
@@ -35,7 +40,7 @@ import {
 import {
   findNearestMainPackageData,
   findNearestPackageData,
-  // loadPackageData,
+  loadPackageData,
   resolvePackageData,
 } from "../packages";
 import type { PackageCache, PackageData } from "../packages";
@@ -44,6 +49,12 @@ const debug = createDebugger("vite:resolve-details", {
   onlyWhenFocused: true,
 });
 
+const ERR_RESOLVE_PACKAGE_ENTRY_FAIL = "ERR_RESOLVE_PACKAGE_ENTRY_FAIL";
+
+// special id for paths marked with browser: false
+// https://github.com/defunctzombie/package-browser-field-spec#ignore-a-module
+export const browserExternalId = "__vite-browser-external";
+// special id for packages that are optional peer deps
 export const optionalPeerDepId = "__vite-optional-peer-dep";
 
 export interface ResolveOptions {
@@ -821,7 +832,7 @@ export function tryNodeResolve(
 
 /**
  * 用于解析深层次的模块导入
- * @param id
+ * @param id 需要解析的模块 ID
  * @param param1
  * @param targetWeb
  * @param options
@@ -830,28 +841,35 @@ export function tryNodeResolve(
 function resolveDeepImport(
   id: string,
   {
+    // 缓存相关的操作
     webResolvedImports,
     setResolvedCache,
     getResolvedCache,
-    dir,
-    data,
+    dir, // 包所在的目录
+    data, // 包的元数据，包括 package.json 中的信息
   }: PackageData,
-  targetWeb: boolean,
-  options: InternalResolveOptions
+  targetWeb: boolean, // 是否为 Web 目标进行解析
+  options: InternalResolveOptions // 解析选项
 ): string | undefined {
+  // 首先检查缓存中是否已有解析结果，如果有则直接返回
   const cache = getResolvedCache(id, targetWeb);
   if (cache) {
     return cache;
   }
 
   let relativeId: string | undefined | void = id;
+  // 从包的元数据中提取 exports 和 browser 字段
   const { exports: exportsField, browser: browserField } = data;
 
   // map relative based on exports data
+  // 处理根据 exports 字段解析模块路径的问题
   if (exportsField) {
+    // 检查 exports 字段是否存在并且是对象（非数组）
     if (isObject(exportsField) && !Array.isArray(exportsField)) {
       // resolve without postfix (see #7098)
+      // 拆分文件和后缀
       const { file, postfix } = splitFileAndPostfix(relativeId);
+      // 解析导出路径
       const exportsId = resolveExportsOrImports(
         data,
         file,
@@ -859,15 +877,22 @@ function resolveDeepImport(
         targetWeb,
         "exports"
       );
+
       if (exportsId !== undefined) {
+        // exportsId 被解析成功，则将 relativeId 设置为 exportsId 加上之前的 postfix
         relativeId = exportsId + postfix;
       } else {
+        // 解析失败则赋值为 undefined，交给后续处理
         relativeId = undefined;
       }
     } else {
-      // not exposed
+      // 如果 exportsField 不是对象或是数组，则直接将 relativeId 设置为 undefined
       relativeId = undefined;
     }
+
+    // 上面的代码的主要功能是根据包的 package.json 文件中的 exports 字段来解析模块路径
+
+    // 如果 relativeId 未定义，抛出错误，提示该子路径未在 exports 字段中定义
     if (!relativeId) {
       throw new Error(
         `Package subpath '${relativeId}' is not defined by "exports" in ` +
@@ -875,56 +900,85 @@ function resolveDeepImport(
       );
     }
   } else if (
+    // 处理在目标为 web 的环境中使用 browser 字段（并且该字段是一个对象）进行模块解析的情况
     targetWeb &&
     options.mainFields.includes("browser") &&
     isObject(browserField)
   ) {
-    // resolve without postfix (see #7098)
+    // 解决没有后缀的情况（参见 #7098）
+
+    // 拆分文件和后缀 如foo/bar.js 将被拆分为 file: "foo/bar" 和 postfix: ".js"
     const { file, postfix } = splitFileAndPostfix(relativeId);
+    // 使用 browserField 映射文件路径
     const mapped = mapWithBrowserField(file, browserField);
     if (mapped) {
+      // 如果映射成功，使用映射后的路径和后缀
       relativeId = mapped + postfix;
     } else if (mapped === false) {
+      // mapped 为false 表示该模块在浏览器环境中不应被解析或加载
+      // 因此将 id 对应的值设置为 browserExternalId
       return (webResolvedImports[id] = browserExternalId);
     }
   }
 
   if (relativeId) {
+    // relativeId 解析成功了，就尝试通过文件系统路径来解析它。
+    // 如果解析成功，将结果缓存起来并返回
+
+    // 调用 tryFsResolve 函数尝试解析文件系统路径
     const resolved = tryFsResolve(
-      path.join(dir, relativeId),
+      path.join(dir, relativeId), //将 dir 和 relativeId 结合起来，形成完整的文件路径
       options,
-      !exportsField, // try index only if no exports field
+      !exportsField, // 如果没有 exports 字段，则尝试使用 index 解析
       targetWeb
     );
+
     if (resolved) {
+      // 解析成功，通过 debug 打印解析结果
       debug?.(
         `[node/deep-import] ${colors.cyan(id)} -> ${colors.dim(resolved)}`
       );
+
+      // 将解析结果缓存起来，以便下次使用
       setResolvedCache(id, resolved, targetWeb);
+
+      // 返回解析结果
       return resolved;
     }
   }
 }
 
+/**
+ * 解析包的入口点，考虑到各种可能的入口配置和字段
+ * @param id
+ * @param param1
+ * @param targetWeb
+ * @param options
+ * @returns
+ */
 export function resolvePackageEntry(
   id: string,
   { dir, data, setResolvedCache, getResolvedCache }: PackageData,
   targetWeb: boolean,
   options: InternalResolveOptions
 ): string | undefined {
+  // 拆分文件和后缀
   const { file: idWithoutPostfix, postfix } = splitFileAndPostfix(id);
 
+  // 检查是否有缓存的解析结果，如果有，直接返回缓存结果加上后缀
   const cached = getResolvedCache(".", targetWeb);
   if (cached) {
     return cached + postfix;
   }
 
   try {
+    // 用于存储解析到的入口点
     let entryPoint: string | undefined;
 
     // resolve exports field with highest priority
     // using https://github.com/lukeed/resolve.exports
     if (data.exports) {
+      // 如果 package.json 中有 exports 字段
       entryPoint = resolveExportsOrImports(
         data,
         ".",
@@ -934,8 +988,9 @@ export function resolvePackageEntry(
       );
     }
 
-    // fallback to mainFields if still not resolved
+    // 如果未解析到入口点，则回退到 mainFields
     if (!entryPoint) {
+      // 遍历 options.mainFields，依次尝试解析 browser 字段或其他字段
       for (const field of options.mainFields) {
         if (field === "browser") {
           if (targetWeb) {
@@ -950,36 +1005,51 @@ export function resolvePackageEntry(
         }
       }
     }
+
+    // 如果上述步骤都未解析到入口点，则尝试使用 main 字段
     entryPoint ||= data.main;
 
-    // try default entry when entry is not define
     // https://nodejs.org/api/modules.html#all-together
+    /**
+     * 如果解析到 entryPoint，使用它作为唯一的入口文件，
+     * 否则使用默认的入口文件 index.js，index.json，index.node
+     */
     const entryPoints = entryPoint
       ? [entryPoint]
       : ["index.js", "index.json", "index.node"];
 
+    // 尝试解析每个入口文件
     for (let entry of entryPoints) {
-      // make sure we don't get scripts when looking for sass
+      // 确保我们在寻找sass的时候没有得到脚本
+
+      // 跳过不适合的脚本文件
       let skipPackageJson = false;
       if (
+        // 第一个字段是 sass
         options.mainFields[0] === "sass" &&
+        // 且入口文件的扩展名不在
         !options.extensions.includes(path.extname(entry))
       ) {
+        // 跳过以避免获取到脚本文件
         entry = "";
         skipPackageJson = true;
       } else {
-        // resolve object browser field in package.json
+        // 解析 package.json 中的 browser 字段
         const { browser: browserField } = data;
         if (
           targetWeb &&
+          // mainFields 包含 browser
           options.mainFields.includes("browser") &&
           isObject(browserField)
         ) {
+          // 解析 browserField 字段
           entry = mapWithBrowserField(entry, browserField) || entry;
         }
       }
 
+      // 构建入口文件的完整路径
       const entryPointPath = path.join(dir, entry);
+      // 尝试文件系统解析入口文件
       const resolvedEntryPoint = tryFsResolve(
         entryPointPath,
         options,
@@ -987,18 +1057,379 @@ export function resolvePackageEntry(
         true,
         skipPackageJson
       );
+
       if (resolvedEntryPoint) {
+        // 如果成功解析到入口文件，调用 debug 函数记录日志
         debug?.(
           `[package entry] ${colors.cyan(idWithoutPostfix)} -> ${colors.dim(
             resolvedEntryPoint
           )}${postfix !== "" ? ` (postfix: ${postfix})` : ""}`
         );
+
+        // 将解析结果缓存起来，最后返回解析结果加上后缀
         setResolvedCache(".", resolvedEntryPoint, targetWeb);
         return resolvedEntryPoint + postfix;
       }
     }
   } catch (e) {
+    // 记录错误信息
     packageEntryFailure(id, e.message);
   }
   packageEntryFailure(id);
+}
+
+/**入口文件解析失败错误处理，主要是抛出响应的错误信息 */
+function packageEntryFailure(id: string, details?: string) {
+  const err: any = new Error(
+    `Failed to resolve entry for package "${id}". ` +
+      `The package may have incorrect main/module/exports specified in its package.json` +
+      (details ? ": " + details : ".")
+  );
+  err.code = ERR_RESOLVE_PACKAGE_ENTRY_FAIL;
+  throw err;
+}
+
+/**
+ * 在模块解析过程中用于尝试解析文件系统路径，确定模块的实际位置
+ * 这个函数主要用于处理 node_modules 中的依赖，特别是那些路径中包含特殊字符如 # 和 ? 的情况
+ * @param fsPath 要解析的文件系统路径
+ * @param options 解析选项，包含一些控制解析行为的参数
+ * @param tryIndex 是否尝试解析 index 文件（如 index.js）
+ * @param targetWeb
+ * @param skipPackageJson  是否跳过 package.json 文件的解析
+ * @returns
+ */
+export function tryFsResolve(
+  fsPath: string,
+  options: InternalResolveOptions,
+  tryIndex = true,
+  targetWeb = true,
+  skipPackageJson = false
+): string | undefined {
+  /**
+   * 源码中这段注释解释了为什么函数 tryFsResolve 需要特别处理路径中包含 # 和 ? 的情况，以及这种处理的适用范围。
+   *
+   * 一些依赖包（例如 es5-ext）在它们的文件路径中会使用 # 这个字符
+   * 在用户编写的源代码中，不允许使用 # 这种特殊字符，因此只需要对 node_modules 中的依赖进行处理
+   * 在 node_modules 中的路径也不允许包含 ? 这种字符，因此这个检查逻辑只需要在处理 node_modules 路径时使用
+   */
+
+  // 检查路径中是否包含 # 和 ?，这是为了处理一些依赖包路径中可能存在的特殊字符
+
+  // 找到路径中 # 的位置
+  const hashIndex = fsPath.indexOf("#");
+  if (hashIndex >= 0 && isInNodeModules(fsPath)) {
+    // 如果路径中包含 # 且位于 node_modules 中，则提取出文件路径进行解析
+
+    // 找到路径中 ？ 的位置
+    const queryIndex = fsPath.indexOf("?");
+    // We only need to check foo#bar?baz and foo#bar, ignore foo?bar#baz
+    if (queryIndex < 0 || queryIndex > hashIndex) {
+      // 如果不存在？ 或者是 ？ 在 # 的后面
+
+      // 提取出不包含查询参数的文件路径
+      const file =
+        queryIndex > hashIndex ? fsPath.slice(0, queryIndex) : fsPath;
+
+      // 解析提取出的文件路径
+      const res = tryCleanFsResolve(
+        file,
+        options,
+        tryIndex,
+        targetWeb,
+        skipPackageJson
+      );
+
+      // 如果解析成功，返回解析结果并加上原路径中的后缀
+      if (res) return res + fsPath.slice(file.length);
+    }
+  }
+
+  // 拆分文件路径和后缀
+  const { file, postfix } = splitFileAndPostfix(fsPath);
+  // 解析文件路径
+  const res = tryCleanFsResolve(
+    file,
+    options,
+    tryIndex,
+    targetWeb,
+    skipPackageJson
+  );
+  // 如果解析成功，返回解析结果并加上后缀
+  if (res) return res + postfix;
+}
+
+/**
+ * 这个函数将路径分为文件路径和后缀部分
+ * @param path
+ * @returns
+ * @example
+ * 如foo/bar.js 将被拆分为 file: "foo/bar" 和 postfix: ".js"
+ */
+function splitFileAndPostfix(path: string) {
+  const file = cleanUrl(path);
+  return { file, postfix: path.slice(file.length) };
+}
+
+/**
+ * 用于根据特定的条件解析包的 exports 或 imports 字段，确定模块的入口点
+ * @param pkg 包数据，通常是 package.json 的内容
+ * @param key  要解析的键，可能是相对路径或模块名
+ * @param options 解析选项，包含一些条件和配置
+ * @param targetWeb 是否针对 Web 环境进行解析
+ * @param type 指定解析的类型，是 exports 还是 imports
+ * @returns
+ */
+function resolveExportsOrImports(
+  pkg: PackageData["data"],
+  key: string,
+  options: InternalResolveOptionsWithOverrideConditions,
+  targetWeb: boolean,
+  type: "imports" | "exports"
+) {
+  // 根据 options 设置附加条件，如果没有提供则使用默认条件
+  const additionalConditions = new Set(
+    options.overrideConditions || [
+      "production",
+      "development",
+      "module",
+      ...options.conditions,
+    ]
+  );
+
+  // 根据当前环境过滤附加条件，例如生产环境和开发环境的区别
+  const conditions = [...additionalConditions].filter((condition) => {
+    switch (condition) {
+      case "production":
+        return options.isProduction;
+      case "development":
+        return !options.isProduction;
+    }
+    return true;
+  });
+
+  // 根据 type 选择解析 imports 还是 exports
+  const fn = type === "imports" ? imports : exports;
+
+  // 解析导入或导出:
+  const result = fn(pkg, key, {
+    browser: targetWeb && !additionalConditions.has("node"),
+    require: options.isRequire && !additionalConditions.has("import"),
+    conditions,
+  });
+
+  // 如果有结果则返回第一个解析结果，否则返回 undefined
+  return result ? result[0] : undefined;
+}
+
+/**
+ * 该函数根据 package.json 中的 browser 字段将路径映射到相应的文件路径
+ * @param relativePathInPkgDir 包目录中的相对路径
+ * @param map 字段的映射对象
+ * @returns
+ */
+function mapWithBrowserField(
+  relativePathInPkgDir: string,
+  map: Record<string, string | false>
+): string | false | undefined {
+  // 将相对路径标准化为 POSIX 风格
+  const normalizedPath = path.posix.normalize(relativePathInPkgDir);
+
+  // 遍历映射:
+  for (const key in map) {
+    // 标准化key
+    const normalizedKey = path.posix.normalize(key);
+
+    if (
+      normalizedPath === normalizedKey ||
+      equalWithoutSuffix(normalizedPath, normalizedKey, ".js") ||
+      equalWithoutSuffix(normalizedPath, normalizedKey, "/index.js")
+    ) {
+      // 如果找到匹配项，则返回对应的映射路径
+      return map[key];
+    }
+  }
+}
+
+/**
+ * 用于比较两个路径是否在去掉特定后缀后相等
+ * @param path 要比较的路径
+ * @param key 参考路径
+ * @param suffix 要去掉的后缀
+ * @returns
+ */
+function equalWithoutSuffix(path: string, key: string, suffix: string) {
+  // 检查 key 是否以 suffix 结尾，并且去掉后缀后的 key 是否等于 path
+  return key.endsWith(suffix) && key.slice(0, -suffix.length) === path;
+}
+
+/**用于匹配可能的 TypeScript 输出文件 */
+const knownTsOutputRE = /\.(?:js|mjs|cjs|jsx)$/;
+/**判断给定的 URL 是否可能是 TypeScript 输出文件 */
+const isPossibleTsOutput = (url: string): boolean => knownTsOutputRE.test(url);
+
+/**
+ * 函数尝试解析文件系统路径，优先考虑解析 .js、.mjs、.cjs、.jsx 到对应的 TypeScript 文件，同时处理目录和包的入口解析
+ * @param file 要解析的文件路径
+ * @param options 解析选项，包括前缀、扩展名、是否保留符号链接等
+ * @param tryIndex 是否尝试解析索引文件
+ * @param targetWeb 是否针对 Web 环境进行解析
+ * @param skipPackageJson 是否跳过 package.json 文件解析
+ * @returns
+ */
+function tryCleanFsResolve(
+  file: string,
+  options: InternalResolveOptions,
+  tryIndex = true,
+  targetWeb = true,
+  skipPackageJson = false
+): string | undefined {
+  const { tryPrefix, extensions, preserveSymlinks } = options;
+
+  // 获取一些 文件系统的工具函数
+  const fsUtils = options.fsUtils ?? commonFsUtils;
+
+  // 优化解析文件类型，如果找到路径直接返回
+  const fileResult = fsUtils.tryResolveRealFileOrType(
+    file,
+    options.preserveSymlinks
+  );
+
+  if (fileResult?.path) return fileResult.path;
+
+  // 用于存储解析后的文件路径
+  let res: string | undefined;
+
+  // 如果路径的目录名是一个有效的目录，尝试扩展名和 TypeScript 解析逻辑
+  /**possibleJsToTs 表示是否需要将可能的 JavaScript 输出文件解析为 TypeScript 文件 */
+  const possibleJsToTs = options.isFromTsImporter && isPossibleTsOutput(file);
+  if (possibleJsToTs || options.extensions.length || tryPrefix) {
+    // 如果需要进行 TypeScript 文件解析，或者指定了扩展名或前缀，则进入进一步解析逻辑
+
+    // 获取文件的目录路径 dirPath
+    const dirPath = path.dirname(file);
+    // 检查 dirPath 是否是一个有效的目录
+    if (fsUtils.isDirectory(dirPath)) {
+      if (possibleJsToTs) {
+        // try resolve .js, .mjs, .cjs or .jsx import to typescript file
+        // 尝试将可能的 JavaScript 输出文件解析为 TypeScript 文件:
+
+        /**
+         * 这段代码的目的是为了在解析 JavaScript 文件时，考虑可能存在的 TypeScript 版本文件 (.ts 或 .tsx)
+         * 这种尝试是为了支持在项目中混合使用 JavaScript 和 TypeScript 文件时的解析需求
+         */
+        // 获取文件的扩展名
+        const fileExt = path.extname(file);
+        // 获取文件名
+        const fileName = file.slice(0, -fileExt.length);
+
+        if (
+          // 尝试将 .js、.mjs、.cjs、.jsx 扩展名替换为 .ts 并解析。
+          (res = fsUtils.tryResolveRealFile(
+            fileName + fileExt.replace("js", "ts"),
+            preserveSymlinks
+          ))
+        )
+          return res;
+
+        // 对于 .js 文件，还尝试将其解析为 .tsx 文件
+        if (
+          fileExt === ".js" &&
+          (res = fsUtils.tryResolveRealFile(
+            fileName + ".tsx",
+            preserveSymlinks
+          ))
+        )
+          return res;
+      }
+
+      // 尝试解析扩展名:
+      if (
+        // 如果有指定的扩展名，尝试将文件路径与这些扩展名结合解析
+        (res = fsUtils.tryResolveRealFileWithExtensions(
+          file,
+          extensions,
+          preserveSymlinks
+        ))
+      )
+        return res;
+
+      // 尝试带前缀的解析:
+      if (tryPrefix) {
+        // 如果指定了前缀，尝试将文件名加上前缀后进行解析
+        const prefixed = `${dirPath}/${options.tryPrefix}${path.basename(
+          file
+        )}`;
+
+        if ((res = fsUtils.tryResolveRealFile(prefixed, preserveSymlinks)))
+          return res;
+
+        if (
+          (res = fsUtils.tryResolveRealFileWithExtensions(
+            prefixed,
+            extensions,
+            preserveSymlinks
+          ))
+        )
+          return res;
+      }
+    }
+  }
+
+  // 检查是否需要进行索引解析:
+  if (tryIndex && fileResult?.type === "directory") {
+    // 处理文件路径指向目录时的解析逻辑。主要是检查目录下是否存在 package.json 文件或者 /index 文件，并进行相应的解析处理
+
+    // 获取当前文件路径作为目录路径
+    const dirPath = file;
+
+    // 如果不跳过解析 package.json，构建 pkgPath 表示 package.json 文件路径
+    if (!skipPackageJson) {
+      let pkgPath = `${dirPath}/package.json`;
+
+      try {
+        //  检查 pkgPath 是否存在
+        if (fsUtils.existsSync(pkgPath)) {
+          // 如果存在且不需要保留符号链接,获取实际路径
+          if (!options.preserveSymlinks) {
+            pkgPath = safeRealpathSync(pkgPath);
+          }
+          // 加载 package.json 数据
+          const pkg = loadPackageData(pkgPath);
+          // 解析包入口
+          return resolvePackageEntry(dirPath, pkg, targetWeb, options);
+        }
+      } catch (e) {
+        // This check is best effort, so if an entry is not found, skip error for now
+        if (e.code !== ERR_RESOLVE_PACKAGE_ENTRY_FAIL && e.code !== "ENOENT")
+          throw e;
+      }
+    }
+
+    // 尝试解析 /index 文件:
+    if (
+      // 尝试解析带有扩展名的 /index 文件
+      (res = fsUtils.tryResolveRealFileWithExtensions(
+        `${dirPath}/index`,
+        extensions,
+        preserveSymlinks
+      ))
+    )
+      return res;
+
+    // 尝试使用前缀的 /index 文件解析
+    if (tryPrefix) {
+      if (
+        (res = fsUtils.tryResolveRealFileWithExtensions(
+          `${dirPath}/${options.tryPrefix}index`,
+          extensions,
+          preserveSymlinks
+        ))
+      )
+        return res;
+    }
+  }
+
+  // tryCleanFsResolve 函数是一个多功能的文件路径解析器，根据传入的参数和文件路径的类型，尝试多种解析逻辑，
+  // 包括但不限于扩展名解析、TypeScript 文件解析、目录下的 package.json 和 /index 文件解析
 }

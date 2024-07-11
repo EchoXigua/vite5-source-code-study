@@ -4,7 +4,7 @@
   "type": "module",
   "description": "",
   "bin": "bin/vite.js",
-  "main": "index.js",
+  "main": "./dist/node/index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "pnpm run build-bundle -w",
@@ -52,6 +52,7 @@
     "parse5": "^7.1.2",
     "picocolors": "^1.0.1",
     "picomatch": "^2.3.1",
+    "resolve.exports": "^2.0.2",
     "sirv": "^2.0.4",
     "strip-literal": "^2.1.0",
     "tslib": "^2.6.3",

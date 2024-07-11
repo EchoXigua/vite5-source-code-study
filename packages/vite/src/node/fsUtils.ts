@@ -34,17 +34,14 @@ export const commonFsUtils: FsUtils = {
   existsSync: fs.existsSync,
   isDirectory,
 
-  // tryResolveRealFile,
-  // tryResolveRealFileWithExtensions,
-  // tryResolveRealFileOrType,
+  tryResolveRealFile,
+  tryResolveRealFileWithExtensions,
+  tryResolveRealFileOrType,
 };
 
 const cachedFsUtilsMap = new WeakMap<ResolvedConfig, FsUtils>();
 export function getFsUtils(config: ResolvedConfig): FsUtils {
-  let fsUtils = cachedFsUtilsMap.get(config) || {
-    existsSync: fs.existsSync,
-    isDirectory,
-  };
+  let fsUtils = cachedFsUtilsMap.get(config);
   if (!fsUtils) {
     if (
       config.command !== "serve" ||
@@ -64,6 +61,7 @@ export function getFsUtils(config: ResolvedConfig): FsUtils {
     } else {
       // fsUtils = createCachedFsUtils(config);
     }
+    fsUtils = commonFsUtils;
     cachedFsUtilsMap.set(config, fsUtils);
   }
 
@@ -80,4 +78,37 @@ function getRealPath(resolved: string, preserveSymlinks?: boolean): string {
 function isDirectory(path: string): boolean {
   const stat = tryStatSync(path);
   return stat?.isDirectory() ?? false;
+}
+
+function tryResolveRealFile(
+  file: string,
+  preserveSymlinks?: boolean
+): string | undefined {
+  const stat = tryStatSync(file);
+  if (stat?.isFile()) return getRealPath(file, preserveSymlinks);
+}
+
+function tryResolveRealFileWithExtensions(
+  filePath: string,
+  extensions: string[],
+  preserveSymlinks?: boolean
+): string | undefined {
+  for (const ext of extensions) {
+    const res = tryResolveRealFile(filePath + ext, preserveSymlinks);
+    if (res) return res;
+  }
+}
+
+function tryResolveRealFileOrType(
+  file: string,
+  preserveSymlinks?: boolean
+): { path?: string; type: "directory" | "file" } | undefined {
+  const fileStat = tryStatSync(file);
+  if (fileStat?.isFile()) {
+    return { path: getRealPath(file, preserveSymlinks), type: "file" };
+  }
+  if (fileStat?.isDirectory()) {
+    return { type: "directory" };
+  }
+  return;
 }
