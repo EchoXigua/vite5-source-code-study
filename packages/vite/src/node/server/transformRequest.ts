@@ -9,14 +9,14 @@ import colors from "picocolors";
 import type { ModuleNode, ViteDevServer } from "..";
 import {
   createDebugger,
-  // ensureWatchedFile,
-  // injectQuery,
+  ensureWatchedFile,
+  injectQuery,
   isObject,
-  // prettifyUrl,
+  prettifyUrl,
   removeImportQuery,
   removeTimestampQuery,
-  // stripBase,
-  // timeFrom,
+  stripBase,
+  timeFrom,
 } from "../utils";
 import { checkPublicFile } from "../publicDir";
 // import { isDepsOptimizerEnabled } from "../config";

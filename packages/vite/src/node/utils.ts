@@ -9,6 +9,7 @@ import fsp from "node:fs/promises";
 import type { AddressInfo, Server } from "node:net";
 import { promises as dns } from "node:dns";
 import debug from "debug";
+import colors from "picocolors";
 import type { FSWatcher } from "chokidar";
 import remapping from "@ampproject/remapping";
 import type { DecodedSourceMap, RawSourceMap } from "@ampproject/remapping";
@@ -1177,4 +1178,33 @@ export function combineSourcemaps(
   map.file = filename;
 
   return map as RawSourceMap;
+}
+
+export function timeFrom(start: number, subtract = 0): string {
+  const time: number | string = performance.now() - start - subtract;
+  const timeString = (time.toFixed(2) + `ms`).padEnd(5, " ");
+  if (time < 10) {
+    return colors.green(timeString);
+  } else if (time < 50) {
+    return colors.yellow(timeString);
+  } else {
+    return colors.red(timeString);
+  }
+}
+
+/**
+ * pretty url for logging.
+ */
+export function prettifyUrl(url: string, root: string): string {
+  url = removeTimestampQuery(url);
+  const isAbsoluteFile = url.startsWith(root);
+  if (isAbsoluteFile || url.startsWith(FS_PREFIX)) {
+    const file = path.posix.relative(
+      root,
+      isAbsoluteFile ? url : fsPathFromId(url)
+    );
+    return colors.dim(file);
+  } else {
+    return colors.dim(url);
+  }
 }
