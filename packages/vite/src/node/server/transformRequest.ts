@@ -18,7 +18,7 @@ import {
   // stripBase,
   // timeFrom,
 } from "../utils";
-// import { checkPublicFile } from "../publicDir";
+import { checkPublicFile } from "../publicDir";
 // import { isDepsOptimizerEnabled } from "../config";
 // import { getDepsOptimizer, initDevSsrDepsOptimizer } from "../optimizer";
 import { cleanUrl, unwrapId } from "../../shared/utils";

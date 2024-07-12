@@ -1,4 +1,8 @@
 import type * as Rollup from "rollup";
+export { formatPostcssSourceMap, preprocessCSS } from './plugins/css'
+export { transformWithEsbuild } from './plugins/esbuild'
+
+export * from './publicUtils'
 
 export type { Rollup };
 

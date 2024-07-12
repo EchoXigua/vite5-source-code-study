@@ -159,6 +159,9 @@ importers:
       strip-literal:
         specifier: ^2.1.0
         version: 2.1.0
+      tsconfck:
+        specifier: ^3.0.3
+        version: 3.1.1(typescript@5.2.2)
       tslib:
         specifier: ^2.6.3
         version: 2.6.3
@@ -1915,6 +1918,19 @@ packages:
   /totalist@3.0.1:
     resolution: {integrity: sha512-sf4i37nQ2LBx4m3wB74y+ubopq6W/dIzXg0FDGjsYnZHVa1Da8FH853wlL2gtUhg+xJXjfk3kUZS3BRoQeoQBQ==}
     engines: {node: '>=6'}
+    dev: true
+
+  /tsconfck@3.1.1(typescript@5.2.2):
+    resolution: {integrity: sha512-00eoI6WY57SvZEVjm13stEVE90VkEdJAFGgpFLTsZbJyW/LwFQ7uQxJHWpZ2hzSWgCPKc9AnBnNP+0X7o3hAmQ==}
+    engines: {node: ^18 || >=20}
+    hasBin: true
+    peerDependencies:
+      typescript: ^5.0.0
+    peerDependenciesMeta:
+      typescript:
+        optional: true
+    dependencies:
+      typescript: 5.2.2
     dev: true
 
   /tslib@2.6.3:

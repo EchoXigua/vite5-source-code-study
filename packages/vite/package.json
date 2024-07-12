@@ -55,6 +55,7 @@
     "resolve.exports": "^2.0.2",
     "sirv": "^2.0.4",
     "strip-literal": "^2.1.0",
+    "tsconfck": "^3.0.3",
     "tslib": "^2.6.3",
     "ws": "^8.17.0"
   }

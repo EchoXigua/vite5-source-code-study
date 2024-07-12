@@ -10,6 +10,8 @@ import type { AddressInfo, Server } from "node:net";
 import { promises as dns } from "node:dns";
 import debug from "debug";
 import type { FSWatcher } from "chokidar";
+import remapping from "@ampproject/remapping";
+import type { DecodedSourceMap, RawSourceMap } from "@ampproject/remapping";
 
 import { createFilter as _createFilter } from "@rollup/pluginutils";
 
@@ -1088,4 +1090,91 @@ export function isOptimizable(
     // 检查 id 是否以 extensions 中的某个扩展名结尾
     (extensions?.some((ext) => id.endsWith(ext)) ?? false)
   );
+}
+
+const nullSourceMap: RawSourceMap = {
+  names: [],
+  sources: [],
+  mappings: "",
+  version: 3,
+};
+
+const windowsDriveRE = /^[A-Z]:/;
+const replaceWindowsDriveRE = /^([A-Z]):\//;
+const linuxAbsolutePathRE = /^\/[^/]/;
+function escapeToLinuxLikePath(path: string) {
+  if (windowsDriveRE.test(path)) {
+    return path.replace(replaceWindowsDriveRE, "/windows/$1/");
+  }
+  if (linuxAbsolutePathRE.test(path)) {
+    return `/linux${path}`;
+  }
+  return path;
+}
+
+const revertWindowsDriveRE = /^\/windows\/([A-Z])\//;
+function unescapeToLinuxLikePath(path: string) {
+  if (path.startsWith("/linux/")) {
+    return path.slice("/linux".length);
+  }
+  if (path.startsWith("/windows/")) {
+    return path.replace(revertWindowsDriveRE, "$1:/");
+  }
+  return path;
+}
+
+export function combineSourcemaps(
+  filename: string,
+  sourcemapList: Array<DecodedSourceMap | RawSourceMap>
+): RawSourceMap {
+  if (
+    sourcemapList.length === 0 ||
+    sourcemapList.every((m) => m.sources.length === 0)
+  ) {
+    return { ...nullSourceMap };
+  }
+
+  // hack for parse broken with normalized absolute paths on windows (C:/path/to/something).
+  // escape them to linux like paths
+  // also avoid mutation here to prevent breaking plugin's using cache to generate sourcemaps like vue (see #7442)
+  sourcemapList = sourcemapList.map((sourcemap) => {
+    const newSourcemaps = { ...sourcemap };
+    newSourcemaps.sources = sourcemap.sources.map((source) =>
+      source ? escapeToLinuxLikePath(source) : null
+    );
+    if (sourcemap.sourceRoot) {
+      newSourcemaps.sourceRoot = escapeToLinuxLikePath(sourcemap.sourceRoot);
+    }
+    return newSourcemaps;
+  });
+  const escapedFilename = escapeToLinuxLikePath(filename);
+
+  // We don't declare type here so we can convert/fake/map as RawSourceMap
+  let map; //: SourceMap
+  let mapIndex = 1;
+  const useArrayInterface =
+    sourcemapList.slice(0, -1).find((m) => m.sources.length !== 1) ===
+    undefined;
+  if (useArrayInterface) {
+    map = remapping(sourcemapList, () => null);
+  } else {
+    map = remapping(sourcemapList[0], function loader(sourcefile) {
+      if (sourcefile === escapedFilename && sourcemapList[mapIndex]) {
+        return sourcemapList[mapIndex++];
+      } else {
+        return null;
+      }
+    });
+  }
+  if (!map.file) {
+    delete map.file;
+  }
+
+  // unescape the previous hack
+  map.sources = map.sources.map((source) =>
+    source ? unescapeToLinuxLikePath(source) : source
+  );
+  map.file = filename;
+
+  return map as RawSourceMap;
 }
