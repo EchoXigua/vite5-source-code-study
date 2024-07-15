@@ -1,7 +1,28 @@
+import path from "node:path";
+
 import type {
   BuildContext,
   BuildOptions as EsbuildBuildOptions,
 } from "esbuild";
+import type { ResolvedConfig } from "../config";
+import {
+  // createDebugger,
+  // flattenId,
+  // getHash,
+  // isOptimizable,
+  // lookupFile,
+  // normalizeId,
+  normalizePath,
+  removeLeadingSlash,
+  tryStatSync,
+  unique,
+} from "../utils";
+
+export {
+  initDepsOptimizer,
+  // initDevSsrDepsOptimizer,
+  getDepsOptimizer,
+} from "./optimizer";
 
 export type ExportsData = {
   hasModuleSyntax: boolean;
@@ -186,6 +207,12 @@ export type DepOptimizationOptions = DepOptimizationConfig & {
   force?: boolean;
 };
 
+/**
+ * 根据依赖的 ID 从 DepOptimizationMetadata 对象中获取优化过的依赖信息
+ * @param metadata
+ * @param id
+ * @returns
+ */
 export function optimizedDepInfoFromId(
   metadata: DepOptimizationMetadata,
   id: string
@@ -195,9 +222,58 @@ export function optimizedDepInfoFromId(
   );
 }
 
+/**
+ * 根据文件路径从 DepOptimizationMetadata 对象中获取优化过的依赖信息
+ * @param metadata
+ * @param file
+ * @returns
+ */
 export function optimizedDepInfoFromFile(
   metadata: DepOptimizationMetadata,
   file: string
 ): OptimizedDepInfo | undefined {
+  // metadata.depInfoList：一个包含所有依赖信息的列表
   return metadata.depInfoList.find((depInfo) => depInfo.file === file);
+}
+
+/**
+ * 用于创建一个检查 URL 是否指向优化过的依赖的函数。这个函数是 Vite 的一部分，用于管理和处理优化过的依赖的缓存
+ * @param config
+ * @returns 这个函数接受一个 URL 字符串作为参数，并返回一个布尔值，表示该 URL 是否指向优化过的依赖
+ */
+export function createIsOptimizedDepUrl(
+  config: ResolvedConfig
+): (url: string) => boolean {
+  /**项目的根目录 */
+  const { root } = config;
+  /**依赖缓存目录的绝对路径 */
+  const depsCacheDir = getDepsCacheDirPrefix(config);
+
+  // 确定缓存目录内文件的url前缀
+  /**缓存目录相对于项目根目录的相对路径 */
+  const depsCacheDirRelative = normalizePath(path.relative(root, depsCacheDir));
+
+  /**
+   * 根据缓存目录的位置，生成 URL 前缀
+   * 如果缓存目录在根目录外面，则前缀以 /@fs/ 开头；如果在根目录内部，则前缀以 / 开头
+   */
+  const depsCacheDirPrefix = depsCacheDirRelative.startsWith("../")
+    ? //  like '/@fs/absolute/path/to/node_modules/.vite'
+      // 如果缓存目录在根目录之外，url前缀将是类似'/@fs/absolute/path/to/node_modules/.vite'
+      `/@fs/${removeLeadingSlash(normalizePath(depsCacheDir))}`
+    : // like '/node_modules/.vite'
+      // 如果缓存目录在根目录中，url前缀将是类似于'/node_modules/.vite '的东西
+      `/${depsCacheDirRelative}`;
+
+  /**
+   * 过检查 URL 是否以 depsCacheDirPrefix 开头来判断 URL 是否指向优化过的依赖。
+   */
+  return function isOptimizedDepUrl(url: string): boolean {
+    return url.startsWith(depsCacheDirPrefix);
+  };
+}
+
+function getDepsCacheDirPrefix(config: ResolvedConfig): string {
+  // 默认的缓存目录为 /node_modules/.vite
+  return normalizePath(path.resolve(config.cacheDir, "deps"));
 }

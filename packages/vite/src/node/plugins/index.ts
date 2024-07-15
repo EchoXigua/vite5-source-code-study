@@ -2,6 +2,9 @@ import aliasPlugin, { type ResolverFunction } from "@rollup/plugin-alias";
 import type { HookHandler, Plugin, PluginWithRequiredHook } from "../plugin";
 import type { PluginHookUtils, ResolvedConfig } from "../config";
 import { isDepsOptimizerEnabled } from "../config";
+import { getDepsOptimizer } from "../optimizer";
+import { shouldExternalizeForSSR } from "../ssr/ssrExternal";
+
 // import { optimizedDepsPlugin } from "./optimizedDeps";
 // import { watchPackageDataPlugin } from '../packages'
 // import { preAliasPlugin } from "./preAlias";
@@ -57,13 +60,14 @@ export async function resolvePlugins(
       ssrConfig: config.ssr,
       asSrc: true,
       fsUtils: getFsUtils(config),
-      // getDepsOptimizer: isBuild
-      //   ? undefined
-      //   : (ssr: boolean) => getDepsOptimizer(config, ssr),
-      // shouldExternalize:
-      //   isBuild && config.build.ssr
-      //     ? (id, importer) => shouldExternalizeForSSR(id, importer, config)
-      //     : undefined,
+      /**这里很重要,是vite 依赖预构建缓存的处理 */
+      getDepsOptimizer: isBuild
+        ? undefined
+        : (ssr: boolean) => getDepsOptimizer(config, ssr),
+      shouldExternalize:
+        isBuild && config.build.ssr
+          ? (id, importer) => shouldExternalizeForSSR(id, importer, config)
+          : undefined,
     }),
     // htmlInlineProxyPlugin(config),
     // cssPlugin(config),

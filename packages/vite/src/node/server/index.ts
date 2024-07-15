@@ -19,10 +19,7 @@ import launchEditorMiddleware from "launch-editor-middleware";
 
 import { createWebSocketServer } from "./ws";
 import { getEnvFilesForMode } from "../env";
-import {
-  // isDepsOptimizerEnabled,
-  resolveConfig,
-} from "../config";
+import { isDepsOptimizerEnabled, resolveConfig } from "../config";
 import type { InlineConfig, ResolvedConfig } from "../config";
 import {
   createHMRBroadcaster,
@@ -68,7 +65,7 @@ import { ERR_CLOSED_SERVER, createPluginContainer } from "./pluginContainer";
 
 import { ERR_OUTDATED_OPTIMIZED_DEP } from "../plugins/optimizedDeps";
 import { openBrowser as _openBrowser } from "./openBrowser";
-// import { getDepsOptimizer, initDepsOptimizer } from "../optimizer";
+import { getDepsOptimizer, initDepsOptimizer } from "../optimizer";
 import { printServerUrls } from "../logger";
 import { bindCLIShortcuts } from "../shortcuts";
 import type { BindCLIShortcutsOptions } from "../shortcuts";
@@ -1103,10 +1100,11 @@ export async function _createServer(
       // 调用 buildStart 钩子函数，开始构建过程
       await container.buildStart({});
       // 在所有容器插件准备好后启动深度优化器
-      // if (isDepsOptimizerEnabled(config, false)) {
-      //   //如果启用了依赖优化器，则初始化依赖优化器
-      //   await initDepsOptimizer(config, server);
-      // }
+      if (isDepsOptimizerEnabled(config, false)) {
+        //如果启用了依赖优化器，则初始化依赖优化器
+        /** 这里开始的依赖预构建 */
+        await initDepsOptimizer(config, server);
+      }
 
       //调用 warmupFiles 函数，对一些文件进行预热，以提高性能
       warmupFiles(server);
