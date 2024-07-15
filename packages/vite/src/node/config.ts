@@ -53,7 +53,7 @@ import {
   createPluginHookUtils,
   getHookHandler,
   getSortedPluginsByHook,
-  // resolvePlugins,
+  resolvePlugins,
 } from "./plugins";
 // import type { InternalResolveOptions, ResolveOptions } from "./plugins/resolve";
 import { resolvePlugin, tryNodeResolve } from "./plugins/resolve";
@@ -87,6 +87,10 @@ import type {
 import type { PackageCache } from "./packages";
 import { findNearestPackageData } from "./packages";
 import { resolveSSROptions } from "./ssr";
+import type {
+  DepOptimizationConfig,
+  DepOptimizationOptions,
+} from "./optimizer";
 
 const debug = createDebugger("vite:config");
 const promisifiedRealpath = promisify(fs.realpath);
@@ -970,12 +974,12 @@ export async function resolveConfig(
     ...resolved,
   };
   //解析插件
-  // (resolved.plugins as Plugin[]) = await resolvePlugins(
-  //   resolved,
-  //   prePlugins,
-  //   normalPlugins,
-  //   postPlugins
-  // );
+  (resolved.plugins as Plugin[]) = await resolvePlugins(
+    resolved,
+    prePlugins,
+    normalPlugins,
+    postPlugins
+  );
   //合并插件钩子工具到 resolved 对象
   Object.assign(resolved, createPluginHookUtils(resolved.plugins));
 
@@ -1638,4 +1642,19 @@ function optimizeDepsDisabledBackwardCompatibility(
       );
     }
   }
+}
+
+export function getDepOptimizationConfig(
+  config: ResolvedConfig,
+  ssr: boolean
+): DepOptimizationConfig {
+  return ssr ? config.ssr.optimizeDeps : config.optimizeDeps;
+}
+
+export function isDepsOptimizerEnabled(
+  config: ResolvedConfig,
+  ssr: boolean
+): boolean {
+  const optimizeDeps = getDepOptimizationConfig(config, ssr);
+  return !(optimizeDeps.noDiscovery && !optimizeDeps.include?.length);
 }

@@ -1,8 +1,8 @@
 import type * as Rollup from "rollup";
-export { formatPostcssSourceMap, preprocessCSS } from './plugins/css'
-export { transformWithEsbuild } from './plugins/esbuild'
+export { formatPostcssSourceMap, preprocessCSS } from "./plugins/css";
+export { transformWithEsbuild } from "./plugins/esbuild";
 
-export * from './publicUtils'
+export * from "./publicUtils";
 
 export type { Rollup };
 
@@ -17,3 +17,10 @@ export type {
   ResolvedUrl,
 } from "./server/moduleGraph";
 export type { CorsOptions, CorsOrigin, CommonServerOptions } from "./http";
+
+export type {
+  ResolvedSSROptions,
+  SsrDepOptimizationOptions,
+  SSROptions,
+  SSRTarget,
+} from "./ssr";

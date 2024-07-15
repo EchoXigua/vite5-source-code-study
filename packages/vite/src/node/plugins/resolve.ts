@@ -3,13 +3,14 @@ import path from "node:path";
 import colors from "picocolors";
 import type { PartialResolvedId } from "rollup";
 import { exports, imports } from "resolve.exports";
+import { hasESMSyntax } from "mlly";
 
 import type { Plugin } from "../plugin";
 import {
   CLIENT_ENTRY,
   DEFAULT_EXTENSIONS,
   DEFAULT_MAIN_FIELDS,
-  // DEP_VERSION_RE,
+  DEP_VERSION_RE,
   ENV_ENTRY,
   FS_PREFIX,
   OPTIMIZABLE_ENTRY_RE,
@@ -19,18 +20,27 @@ import {
   bareImportRE,
   createDebugger,
   deepImportRE,
+  fsPathFromId,
   getNpmPackageName,
   injectQuery,
   isBuiltin,
+  isDataUrl,
+  isExternalUrl,
   isFilePathESM,
   isInNodeModules,
+  isNonDriveRelativeAbsolutePath,
   isObject,
   isOptimizable,
+  isTsRequest,
+  normalizePath,
   safeRealpathSync,
+  tryStatSync,
 } from "../utils";
+import { optimizedDepInfoFromFile, optimizedDepInfoFromId } from "../optimizer";
 import type { DepsOptimizer } from "../optimizer";
+import type { SSROptions } from "..";
 import { commonFsUtils } from "../fsUtils";
-
+import type { FsUtils } from "../fsUtils";
 import {
   cleanUrl,
   isWindows,
@@ -45,6 +55,9 @@ import {
 } from "../packages";
 import type { PackageCache, PackageData } from "../packages";
 
+const normalizedClientEntry = normalizePath(CLIENT_ENTRY);
+const normalizedEnvEntry = normalizePath(ENV_ENTRY);
+
 const debug = createDebugger("vite:resolve-details", {
   onlyWhenFocused: true,
 });
@@ -56,6 +69,11 @@ const ERR_RESOLVE_PACKAGE_ENTRY_FAIL = "ERR_RESOLVE_PACKAGE_ENTRY_FAIL";
 export const browserExternalId = "__vite-browser-external";
 // special id for packages that are optional peer deps
 export const optionalPeerDepId = "__vite-optional-peer-dep";
+
+const subpathImportsPrefix = "#";
+
+/**以单词字符开头 */
+const startsWithWordCharRE = /^\w/;
 
 export interface ResolveOptions {
   /**
@@ -113,6 +131,14 @@ export interface InternalResolveOptions extends Required<ResolveOptions> {
   idOnly?: boolean;
 }
 
+/**
+ * 用于创建一个 Vite 插件，该插件处理模块解析逻辑
+ * 返回的插件对象包含两个钩子：resolveId 和 load
+ * resolveId 钩子处理模块 ID 的解析，包括处理虚拟模块、相对路径、外部 URL 和裸包导入等
+ * load 钩子用于处理浏览器外部模块和可选的 Peer 依赖模块
+ * @param resolveOptions
+ * @returns
+ */
 export function resolvePlugin(resolveOptions: InternalResolveOptions): Plugin {
   const {
     root,
@@ -133,12 +159,32 @@ export function resolvePlugin(resolveOptions: InternalResolveOptions): Plugin {
   // back to checking the path as absolute. If /root/root isn't a valid path, we can
   // avoid these checks. Absolute paths inside root are common in user code as many
   // paths are resolved by the user. For example for an alias.
+  /**
+   * 这段注释解释了在 Unix 系统中处理绝对路径的一些注意事项
+   *
+   * 1. Unix系统中的绝对路径检查：在 Unix 系统中，如果一个路径是绝对路径（例如 /root/root/path-to-file），
+   * 首先需要检查它是否是一个绝对 URL。这是因为某些情况下，这样的路径可能被解释为 URL，而不是文件系统路径。
+   *
+   * 2. 失败检查和回退处理：当检查绝对 URL 失败时，才会回退到检查该路径是否为绝对文件系统路径。
+   * 这种处理方式确保了路径解析的正确性，但也可能导致一些不必要的检查。
+   *
+   * 3. 优化检查：如果可以确定 /root/root 不是一个有效的路径，就可以跳过这些检查，从而优化路径解析过程。
+   * 这是因为如果根目录内的绝对路径无效，就没有必要进行这些检查，可以直接检查路径是否为绝对文件系统路径。
+   *
+   * 4. 用户代码中的绝对路径：在用户代码中，绝对路径非常常见，尤其是用户自行解析路径的时候。
+   * 例如，当用户使用别名（alias）时，常常会生成绝对路径。
+   * 检查根目录是否在根目录内部，这是为了处理 Unix 系统中的绝对路径。
+   */
   const rootInRoot = tryStatSync(path.join(root, root))?.isDirectory() ?? false;
 
   return {
     name: "vite:resolve",
 
     async resolveId(id, importer, resolveOpts) {
+      /**
+       * 如果 id 以 \0 开头，或者以 virtual: 或 /virtual: 开头，则不进行进一步处理，直接返回。
+       * 这些通常是虚拟模块，或者是直接注入到 HTML/客户端代码中的特殊模块。
+       */
       if (
         id[0] === "\0" ||
         id.startsWith("virtual:") ||
@@ -148,57 +194,80 @@ export function resolvePlugin(resolveOptions: InternalResolveOptions): Plugin {
         return;
       }
 
+      // 判断是否为SSR
       const ssr = resolveOpts?.ssr === true;
 
-      // We need to delay depsOptimizer until here instead of passing it as an option
-      // the resolvePlugin because the optimizer is created on server listen during dev
+      /**
+       * 延迟获取依赖优化器 depsOptimizer，因为优化器是在开发服务器监听期间创建的
+       */
       const depsOptimizer = resolveOptions.getDepsOptimizer?.(ssr);
 
+      // 如果 id 以 browserExternalId 开头，则直接返回该 id。
+      // browserExternalId 用于标识浏览器环境中的外部模块。
       if (id.startsWith(browserExternalId)) {
         return id;
       }
 
+      // 确定目标环境是否为 Web
       const targetWeb = !ssr || ssrTarget === "webworker";
 
-      // this is passed by @rollup/plugin-commonjs
+      /**
+       * 检查 resolveOpts 中是否包含 node-resolve 自定义选项，并且 isRequire 是否为 true
+       * 这是由 @rollup/plugin-commonjs 插件传递的，用于区分 CommonJS 的 require
+       */
       const isRequire: boolean =
         resolveOpts?.custom?.["node-resolve"]?.isRequire ?? false;
 
       // end user can configure different conditions for ssr and client.
       // falls back to client conditions if no ssr conditions supplied
+      /**获取 SSR 的解析条件 */
       const ssrConditions =
+        // 如果 ssrConfig 中定义了 resolve.conditions，则使用该条件；否则使用默认的解析条件
         resolveOptions.ssrConfig?.resolve?.conditions ||
         resolveOptions.conditions;
 
+      /**构建内部解析选项对象 options */
       const options: InternalResolveOptions = {
+        // 是否为 require 调用、解析选项、扫描选项，以及条件选项
         isRequire,
         ...resolveOptions,
         scan: resolveOpts?.scan ?? resolveOptions.scan,
         conditions: ssr ? ssrConditions : resolveOptions.conditions,
       };
 
+      /**解析子路径导入 */
       const resolvedImports = resolveSubpathImports(
         id,
         importer,
         options,
         targetWeb
       );
+
+      // 如果返回结果存在，更新 id
       if (resolvedImports) {
         id = resolvedImports;
 
         if (resolveOpts.custom?.["vite:import-glob"]?.isSubImportsPattern) {
+          // 这个选项用于处理导入全局模式的子路径模式
+          // vite:import-glob 选项有 isSubImportsPattern 属性，则直接返回解析后的 id
           return id;
         }
       }
 
+      // 如果存在 importer（导入者），进行进一步检查
       if (importer) {
         if (
+          // 如果导入者是一个 TypeScript 请求
           isTsRequest(importer) ||
           resolveOpts.custom?.depScan?.loader?.startsWith("ts")
         ) {
+          // 这用于标识当前模块是从 TypeScript 文件中导入的。
           options.isFromTsImporter = true;
         } else {
+          // 获取导入者模块的信息，并检查其 meta.vite.lang 属性
           const moduleLang = this.getModuleInfo(importer)?.meta?.vite?.lang;
+
+          // 如果存在该属性且表示 TypeScript，则将 options.isFromTsImporter 设置为 true
           options.isFromTsImporter =
             moduleLang && isTsRequest(`.${moduleLang}`);
         }
@@ -206,33 +275,43 @@ export function resolvePlugin(resolveOptions: InternalResolveOptions): Plugin {
 
       let res: string | PartialResolvedId | undefined;
 
-      // resolve pre-bundled deps requests, these could be resolved by
-      // tryFileResolve or /fs/ resolution but these files may not yet
-      // exists if we are in the middle of a deps re-processing
+      /**
+       * 解决预打包依赖请求，这些请求可以通过 tryFileResolve 或 /fs/ 解析，
+       * 但这些文件可能还不存在，因为我们可能正处于依赖重新处理的中间
+       */
+      // 预打包依赖请求：处理预打包依赖的 URL
       if (asSrc && depsOptimizer?.isOptimizedDepUrl(id)) {
+        // 是优化依赖的 URL，则继续处理
+
+        // 如果 id 以 FS_PREFIX 开头，使用 fsPathFromId(id) 函数获取优化路径；否则，将 id 转换为标准化路径
         const optimizedPath = id.startsWith(FS_PREFIX)
           ? fsPathFromId(id)
           : normalizePath(path.resolve(root, id.slice(1)));
+
+        // 返回优化路径
         return optimizedPath;
       }
 
-      // explicit fs paths that starts with /@fs/*
+      // 显式文件系统路径以 /@fs/* 开头
       if (asSrc && id.startsWith(FS_PREFIX)) {
         res = fsPathFromId(id);
-        // We don't need to resolve these paths since they are already resolved
-        // always return here even if res doesn't exist since /@fs/ is explicit
-        // if the file doesn't exist it should be a 404.
+        /**
+         * 这些路径已经解析过，不需要再解析，即使 res 不存在也要返回，
+         * 因为 /@fs/ 是显式路径，如果文件不存在则应该是 404 错误
+         */
         debug?.(`[@fs] ${colors.cyan(id)} -> ${colors.dim(res)}`);
         return ensureVersionQuery(res, id, options, depsOptimizer);
       }
 
-      // URL
       // /foo -> /fs-root/foo
+      // URL路径：处理以 / 开头的 URL 路径，将其解析为文件系统路径
       if (
         asSrc &&
         id[0] === "/" &&
+        // rootInRoot 为真或 id 不是以 root 开头，继续处理
         (rootInRoot || !id.startsWith(withTrailingSlash(root)))
       ) {
+        // 将 id 转换为文件系统路径
         const fsPath = path.resolve(root, id.slice(1));
         if ((res = tryFsResolve(fsPath, options))) {
           debug?.(`[url] ${colors.cyan(id)} -> ${colors.dim(res)}`);
@@ -240,21 +319,31 @@ export function resolvePlugin(resolveOptions: InternalResolveOptions): Plugin {
         }
       }
 
-      // relative
+      // 处理相对路径
       if (
+        // 这部分代码是为了识别并处理相对路径和某些特殊情况（如 HTML 文件中的导入）
+        // .开头说明是相对路径
         id[0] === "." ||
+        // preferRelative 为真 或 importer 以 .html 结尾(html 里面导入的)
         ((preferRelative || importer?.endsWith(".html")) &&
+          //以单词字符开头
           startsWithWordCharRE.test(id))
       ) {
+        // 获取基准路径, 获取导入者的路径,如果没有则使用当前工作目录
         const basedir = importer ? path.dirname(importer) : process.cwd();
+        // 相对于 basedir 的文件系统路径
         const fsPath = path.resolve(basedir, id);
-        // handle browser field mapping for relative imports
 
+        // 将文件系统路径标准化
         const normalizedFsPath = normalizePath(fsPath);
 
+        // 处理优化的依赖文件：
         if (depsOptimizer?.isOptimizedDepFile(normalizedFsPath)) {
-          // Optimized files could not yet exist in disk, resolve to the full path
-          // Inject the current browserHash version if the path doesn't have one
+          /**
+           * 如果标准化后的路径是优化依赖文件，处理如下
+           * 1. 这些优化文件可能尚未存在于磁盘上，因此解析为完整路径
+           * 2. 如果当前不是构建阶段，并且路径中不包含版本信息，则注入当前 browserHash 版本
+           */
           if (
             !resolveOptions.isBuild &&
             !DEP_VERSION_RE.test(normalizedFsPath)
@@ -264,32 +353,43 @@ export function resolvePlugin(resolveOptions: InternalResolveOptions): Plugin {
               normalizedFsPath
             )?.browserHash;
             if (browserHash) {
+              // 返回带版本信息的路径
               return injectQuery(normalizedFsPath, `v=${browserHash}`);
             }
           }
+          // 返回标准化后的路径
           return normalizedFsPath;
         }
 
+        // 处理浏览器字段映射：
         if (
           targetWeb &&
           options.mainFields.includes("browser") &&
+          // 尝试进行浏览器映射
           (res = tryResolveBrowserMapping(fsPath, importer, options, true))
         ) {
           return res;
         }
 
+        // 尝试文件系统解析：
         if ((res = tryFsResolve(fsPath, options))) {
+          // 解析成功后，确保路径包含版本信息，并打印调试信息
           res = ensureVersionQuery(res, id, options, depsOptimizer);
           debug?.(`[relative] ${colors.cyan(id)} -> ${colors.dim(res)}`);
 
-          // If this isn't a script imported from a .html file, include side effects
-          // hints so the non-used code is properly tree-shaken during build time.
+          /**
+           * 如果这不是从.html文件导入的脚本，则包括副作用提示，以便在构建期间正确地对未使用的代码进行树摇。
+           */
+
+          // 处理模块副作用：
           if (
+            // 不是仅解析 ID 且不是扫描模式并且是构建阶段且导入者不是以 .html 结尾
             !options.idOnly &&
             !options.scan &&
             options.isBuild &&
             !importer?.endsWith(".html")
           ) {
+            // 查找最近的包数据，获取包的副作用信息
             const resPkg = findNearestPackageData(
               path.dirname(res),
               options.packageCache
@@ -305,44 +405,62 @@ export function resolvePlugin(resolveOptions: InternalResolveOptions): Plugin {
         }
       }
 
-      // drive relative fs paths (only windows)
+      // 处理驱动器相对路径（仅限 Windows）
+      // 首先判断是否在 Windows 平台并且 id 以 / 开头
       if (isWindows && id[0] === "/") {
+        // 基准路径获取
         const basedir = importer ? path.dirname(importer) : process.cwd();
         const fsPath = path.resolve(basedir, id);
+        // 尝试使用 tryFsResolve 函数解析文件系统路径
         if ((res = tryFsResolve(fsPath, options))) {
+          // 如果解析成功，打印调试信息
           debug?.(`[drive-relative] ${colors.cyan(id)} -> ${colors.dim(res)}`);
+          // 确保解析后的路径包含版本信息并返回
           return ensureVersionQuery(res, id, options, depsOptimizer);
         }
       }
 
-      // absolute fs paths
+      // 处理绝对文件系统路径
       if (
+        // 判断 id 是否为非驱动器相对的绝对路径
         isNonDriveRelativeAbsolutePath(id) &&
+        // 尝试直接解析 id 为文件系统路径
         (res = tryFsResolve(id, options))
       ) {
+        // 如果解析成功，打印调试信息
         debug?.(`[fs] ${colors.cyan(id)} -> ${colors.dim(res)}`);
+        // 确保解析后的路径包含版本信息并返回
         return ensureVersionQuery(res, id, options, depsOptimizer);
       }
 
-      // external
+      // 处理外部 URL
+      // 判断 id 是否为外部 URL
       if (isExternalUrl(id)) {
         return options.idOnly ? id : { id, external: true };
       }
 
-      // data uri: pass through (this only happens during build and will be
-      // handled by dedicated plugin)
+      // 数据uri: pass through(这只发生在构建期间，将由专用插件处理)
+      // 处理数据 URI
       if (isDataUrl(id)) {
         return null;
       }
 
-      // bare package imports, perform node resolve
+      // 处理裸包导入，执行 Node 解析
+      // 首先判断 id 是否匹配裸包导入的正则表达式 bareImportRE
       if (bareImportRE.test(id)) {
+        // 判断是否应该外部化此模块
         const external = options.shouldExternalize?.(id, importer);
+
         if (
+          // 如果模块不应该外部化
           !external &&
+          // 是源文件
           asSrc &&
+          // 存在依赖优化器并
           depsOptimizer &&
+          // 不是扫描模式
           !options.scan &&
+          // 试优化解析此模块
           (res = await tryOptimizedResolve(
             depsOptimizer,
             id,
@@ -351,12 +469,15 @@ export function resolvePlugin(resolveOptions: InternalResolveOptions): Plugin {
             options.packageCache
           ))
         ) {
+          // 如果优化解析成功，返回解析结果
           return res;
         }
 
+        // 尝试浏览器映射解析
         if (
           targetWeb &&
           options.mainFields.includes("browser") &&
+          // 则尝试浏览器映射解析
           (res = tryResolveBrowserMapping(
             id,
             importer,
@@ -368,6 +489,7 @@ export function resolvePlugin(resolveOptions: InternalResolveOptions): Plugin {
           return res;
         }
 
+        // 尝试 Node 解析
         if (
           (res = tryNodeResolve(
             id,
@@ -382,15 +504,32 @@ export function resolvePlugin(resolveOptions: InternalResolveOptions): Plugin {
           return res;
         }
 
-        // node built-ins.
-        // externalize if building for SSR, otherwise redirect to empty module
+        // 处理 Node 内置模块
+        // 判断 id 是否为 Node 内置模块
         if (isBuiltin(id)) {
           if (ssr) {
+            // ssr 模式下的处理
+
             if (
               targetWeb &&
               ssrNoExternal === true &&
               // if both noExternal and external are true, noExternal will take the higher priority and bundle it.
               // only if the id is explicitly listed in external, we will externalize it and skip this error.
+              /**
+               * 如果noExternal和external都为真，则noExternal将获得更高的优先级并将其绑定。
+               * 只有当id在external中显式列出时，我们才会将其外部化并跳过此错误。
+               *
+               *
+               * 1. 当配置中同时设置了 noExternal 和 external 为 true 时，noExternal 的优先级更高。
+               * 也就是说，即使 external 选项也为 true，noExternal 选项会导致模块被打包（bundle）在最终输出中。
+               * noExternal 配置项通常用于指示哪些模块应该被打包在最终的构建中，而不是作为外部模块。
+               * 它通常用于确保某些依赖始终被打包进输出文件中，避免在运行时从外部获取。
+               *
+               * 2. 只有当 id 明确地列在 external 配置中时，模块才会被外部化（externalized）。
+               * 外部化意味着该模块不会被打包到输出中，而是作为外部依赖存在
+               * 如果 id 在 external 配置中被列出，那么即使有冲突，模块会按照外部化的配置进行处理，不会抛出错误。
+               *
+               */
               (ssrExternal === true || !ssrExternal?.includes(id))
             ) {
               let message = `Cannot bundle Node.js built-in "${id}"`;
@@ -408,17 +547,21 @@ export function resolvePlugin(resolveOptions: InternalResolveOptions): Plugin {
               ? id
               : { id, external: true, moduleSideEffects: false };
           } else {
+            // 不是 SSR 模式
             if (!asSrc) {
+              // 如果不是源文件，打印调试信息
               debug?.(
                 `externalized node built-in "${id}" to empty module. ` +
                   `(imported by: ${colors.white(colors.dim(importer))})`
               );
             } else if (isProduction) {
+              // 如果是生产模式，打印警告信息
               this.warn(
                 `Module "${id}" has been externalized for browser compatibility, imported by "${importer}". ` +
                   `See https://vitejs.dev/guide/troubleshooting.html#module-externalized-for-browser-compatibility for more details.`
               );
             }
+
             return isProduction
               ? browserExternalId
               : `${browserExternalId}:${id}`;
@@ -430,10 +573,17 @@ export function resolvePlugin(resolveOptions: InternalResolveOptions): Plugin {
     },
 
     load(id) {
+      // 处理浏览器外部化模块
+      // 如果是，表示该模块在浏览器环境下被外部化了（即，不会被打包进最终的客户端代码中）
       if (id.startsWith(browserExternalId)) {
         if (isProduction) {
+          // 在生产环境中，外部化的模块会被替换成一个空对象 {}。
+          // 这意味着即使尝试访问这些模块的内容，它们会被替换为空对象，没有实际的代码或数据
           return `export default {}`;
         } else {
+          // 在开发环境中，如果尝试访问外部化的模块，返回的代码将创建一个 Proxy 对象，这个对象会拦截所有的属性访问请求，并抛出错误
+          // 错误消息中包含模块的 ID，并指出该模块已被外部化，不能在客户端代码中访问
+          // 这个处理是为了帮助开发人员诊断为什么模块不可用
           id = id.slice(browserExternalId.length + 1);
           return `\
 export default new Proxy({}, {
@@ -443,10 +593,13 @@ export default new Proxy({}, {
 })`;
         }
       }
+      // 处理可选的对等依赖
       if (id.startsWith(optionalPeerDepId)) {
         if (isProduction) {
           return `export default {}`;
         } else {
+          // 在开发环境中，代码将抛出一个错误，说明无法解析指定的对等依赖 peerDep，并指明它是由 parentDep 引入的。
+          // 错误消息提示开发人员检查这些依赖是否已安装
           const [, peerDep, parentDep] = id.split(":");
           return `throw new Error(\`Could not resolve "${peerDep}" imported by "${parentDep}". Is it installed?\`)`;
         }
@@ -1432,4 +1585,212 @@ function tryCleanFsResolve(
 
   // tryCleanFsResolve 函数是一个多功能的文件路径解析器，根据传入的参数和文件路径的类型，尝试多种解析逻辑，
   // 包括但不限于扩展名解析、TypeScript 文件解析、目录下的 package.json 和 /index 文件解析
+}
+
+function ensureVersionQuery(
+  resolved: string,
+  id: string,
+  options: InternalResolveOptions,
+  depsOptimizer?: DepsOptimizer
+): string {
+  if (
+    !options.isBuild &&
+    !options.scan &&
+    depsOptimizer &&
+    !(resolved === normalizedClientEntry || resolved === normalizedEnvEntry)
+  ) {
+    // Ensure that direct imports of node_modules have the same version query
+    // as if they would have been imported through a bare import
+    // Use the original id to do the check as the resolved id may be the real
+    // file path after symlinks resolution
+    const isNodeModule = isInNodeModules(id) || isInNodeModules(resolved);
+
+    if (isNodeModule && !DEP_VERSION_RE.test(resolved)) {
+      const versionHash = depsOptimizer.metadata.browserHash;
+      if (versionHash && isOptimizable(resolved, depsOptimizer.options)) {
+        resolved = injectQuery(resolved, `v=${versionHash}`);
+      }
+    }
+  }
+  return resolved;
+}
+
+function tryResolveBrowserMapping(
+  id: string,
+  importer: string | undefined,
+  options: InternalResolveOptions,
+  isFilePath: boolean,
+  externalize?: boolean
+) {
+  let res: string | undefined;
+  const pkg =
+    importer &&
+    findNearestPackageData(path.dirname(importer), options.packageCache);
+  if (pkg && isObject(pkg.data.browser)) {
+    const mapId = isFilePath ? "./" + slash(path.relative(pkg.dir, id)) : id;
+    const browserMappedPath = mapWithBrowserField(mapId, pkg.data.browser);
+    if (browserMappedPath) {
+      if (
+        (res = bareImportRE.test(browserMappedPath)
+          ? tryNodeResolve(browserMappedPath, importer, options, true)?.id
+          : tryFsResolve(path.join(pkg.dir, browserMappedPath), options))
+      ) {
+        debug?.(`[browser mapped] ${colors.cyan(id)} -> ${colors.dim(res)}`);
+        let result: PartialResolvedId = { id: res };
+        if (options.idOnly) {
+          return result;
+        }
+        if (!options.scan && options.isBuild) {
+          const resPkg = findNearestPackageData(
+            path.dirname(res),
+            options.packageCache
+          );
+          if (resPkg) {
+            result = {
+              id: res,
+              moduleSideEffects: resPkg.hasSideEffects(res),
+            };
+          }
+        }
+        return externalize ? { ...result, external: true } : result;
+      }
+    } else if (browserMappedPath === false) {
+      return browserExternalId;
+    }
+  }
+}
+
+function tryResolveBrowserEntry(
+  dir: string,
+  data: PackageData["data"],
+  options: InternalResolveOptions
+) {
+  // handle edge case with browser and module field semantics
+
+  // check browser field
+  // https://github.com/defunctzombie/package-browser-field-spec
+  const browserEntry =
+    typeof data.browser === "string"
+      ? data.browser
+      : isObject(data.browser) && data.browser["."];
+  if (browserEntry) {
+    // check if the package also has a "module" field.
+    if (
+      !options.isRequire &&
+      options.mainFields.includes("module") &&
+      typeof data.module === "string" &&
+      data.module !== browserEntry
+    ) {
+      // if both are present, we may have a problem: some package points both
+      // to ESM, with "module" targeting Node.js, while some packages points
+      // "module" to browser ESM and "browser" to UMD/IIFE.
+      // the heuristics here is to actually read the browser entry when
+      // possible and check for hints of ESM. If it is not ESM, prefer "module"
+      // instead; Otherwise, assume it's ESM and use it.
+      const resolvedBrowserEntry = tryFsResolve(
+        path.join(dir, browserEntry),
+        options
+      );
+      if (resolvedBrowserEntry) {
+        const content = fs.readFileSync(resolvedBrowserEntry, "utf-8");
+        if (hasESMSyntax(content)) {
+          // likely ESM, prefer browser
+          return browserEntry;
+        } else {
+          // non-ESM, UMD or IIFE or CJS(!!! e.g. firebase 7.x), prefer module
+          return data.module;
+        }
+      }
+    } else {
+      return browserEntry;
+    }
+  }
+}
+
+function resolveSubpathImports(
+  id: string,
+  importer: string | undefined,
+  options: InternalResolveOptions,
+  targetWeb: boolean
+) {
+  if (!importer || !id.startsWith(subpathImportsPrefix)) return;
+  const basedir = path.dirname(importer);
+  const pkgData = findNearestPackageData(basedir, options.packageCache);
+  if (!pkgData) return;
+
+  let { file: idWithoutPostfix, postfix } = splitFileAndPostfix(id.slice(1));
+  idWithoutPostfix = "#" + idWithoutPostfix;
+
+  let importsPath = resolveExportsOrImports(
+    pkgData.data,
+    idWithoutPostfix,
+    options,
+    targetWeb,
+    "imports"
+  );
+
+  if (importsPath?.[0] === ".") {
+    importsPath = path.relative(basedir, path.join(pkgData.dir, importsPath));
+
+    if (importsPath[0] !== ".") {
+      importsPath = `./${importsPath}`;
+    }
+  }
+
+  return importsPath + postfix;
+}
+
+export async function tryOptimizedResolve(
+  depsOptimizer: DepsOptimizer,
+  id: string,
+  importer?: string,
+  preserveSymlinks?: boolean,
+  packageCache?: PackageCache
+): Promise<string | undefined> {
+  // TODO: we need to wait until scanning is done here as this function
+  // is used in the preAliasPlugin to decide if an aliased dep is optimized,
+  // and avoid replacing the bare import with the resolved path.
+  // We should be able to remove this in the future
+  await depsOptimizer.scanProcessing;
+
+  const metadata = depsOptimizer.metadata;
+
+  const depInfo = optimizedDepInfoFromId(metadata, id);
+  if (depInfo) {
+    return depsOptimizer.getOptimizedDepId(depInfo);
+  }
+
+  if (!importer) return;
+
+  // further check if id is imported by nested dependency
+  let idPkgDir: string | undefined;
+  const nestedIdMatch = `> ${id}`;
+
+  for (const optimizedData of metadata.depInfoList) {
+    if (!optimizedData.src) continue; // Ignore chunks
+
+    // check where "foo" is nested in "my-lib > foo"
+    if (!optimizedData.id.endsWith(nestedIdMatch)) continue;
+
+    // lazily initialize idPkgDir
+    if (idPkgDir == null) {
+      const pkgName = getNpmPackageName(id);
+      if (!pkgName) break;
+      idPkgDir = resolvePackageData(
+        pkgName,
+        importer,
+        preserveSymlinks,
+        packageCache
+      )?.dir;
+      // if still null, it likely means that this id isn't a dep for importer.
+      // break to bail early
+      if (idPkgDir == null) break;
+      idPkgDir = normalizePath(idPkgDir);
+    }
+
+    // match by src to correctly identify if id belongs to nested dependency
+    if (optimizedData.src.startsWith(withTrailingSlash(idPkgDir))) {
+      return depsOptimizer.getOptimizedDepId(optimizedData);
+    }
+  }
 }

@@ -6,6 +6,7 @@ import type {
   ModuleFormat,
   RollupOptions,
   WatcherOptions,
+  Plugin,
 } from "rollup";
 import commonjsPlugin from "@rollup/plugin-commonjs";
 import type { RollupCommonJSOptions } from "dep-types/commonjs";
@@ -19,6 +20,8 @@ import {
   ESBUILD_MODULES_TARGET,
   VERSION,
 } from "./constants";
+import type { InlineConfig, ResolvedConfig } from "./config";
+
 import { mergeConfig } from "./publicUtils";
 import { requireResolveFromRootWithFallback } from "./utils";
 import { type TerserOptions } from "./plugins/terser";
@@ -393,3 +396,8 @@ export function resolveBuildOptions(
 
   return resolved;
 }
+
+export async function resolveBuildPlugins(config: ResolvedConfig): Promise<{
+  pre: Plugin[];
+  post: Plugin[];
+}> {}

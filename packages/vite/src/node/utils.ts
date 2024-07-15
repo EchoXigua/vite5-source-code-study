@@ -350,6 +350,9 @@ export function tryStatSync(file: string): fs.Stats | undefined {
 export const externalRE = /^(https?:)?\/\//;
 export const isExternalUrl = (url: string): boolean => externalRE.test(url);
 
+export const dataUrlRE = /^\s*data:/i;
+export const isDataUrl = (url: string): boolean => dataUrlRE.test(url);
+
 const _dirname = path.dirname(fileURLToPath(import.meta.url));
 const _require = createRequire(import.meta.url);
 
@@ -1041,6 +1044,9 @@ export const isJSRequest = (url: string): boolean => {
   return false;
 };
 
+const knownTsRE = /\.(?:ts|mts|cts|tsx)(?:$|\?)/;
+export const isTsRequest = (url: string): boolean => knownTsRE.test(url);
+
 export function stripBase(path: string, base: string): string {
   if (path === base) {
     return "/";
@@ -1208,3 +1214,14 @@ export function prettifyUrl(url: string, root: string): string {
     return colors.dim(url);
   }
 }
+
+const windowsDrivePathPrefixRE = /^[A-Za-z]:[/\\]/;
+
+/**
+ * path.isAbsolute also returns true for drive relative paths on windows (e.g. /something)
+ * this function returns false for them but true for absolute paths (e.g. C:/something)
+ */
+export const isNonDriveRelativeAbsolutePath = (p: string): boolean => {
+  if (!isWindows) return p[0] === "/";
+  return windowsDrivePathPrefixRE.test(p);
+};

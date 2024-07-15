@@ -185,3 +185,19 @@ export type DepOptimizationOptions = DepOptimizationConfig & {
    */
   force?: boolean;
 };
+
+export function optimizedDepInfoFromId(
+  metadata: DepOptimizationMetadata,
+  id: string
+): OptimizedDepInfo | undefined {
+  return (
+    metadata.optimized[id] || metadata.discovered[id] || metadata.chunks[id]
+  );
+}
+
+export function optimizedDepInfoFromFile(
+  metadata: DepOptimizationMetadata,
+  file: string
+): OptimizedDepInfo | undefined {
+  return metadata.depInfoList.find((depInfo) => depInfo.file === file);
+}

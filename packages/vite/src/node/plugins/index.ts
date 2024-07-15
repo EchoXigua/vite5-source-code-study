@@ -1,5 +1,105 @@
+import aliasPlugin, { type ResolverFunction } from "@rollup/plugin-alias";
 import type { HookHandler, Plugin, PluginWithRequiredHook } from "../plugin";
 import type { PluginHookUtils, ResolvedConfig } from "../config";
+import { isDepsOptimizerEnabled } from "../config";
+// import { optimizedDepsPlugin } from "./optimizedDeps";
+// import { watchPackageDataPlugin } from '../packages'
+// import { preAliasPlugin } from "./preAlias";
+import { resolvePlugin } from "./resolve";
+import { getFsUtils } from "../fsUtils";
+
+/**
+ * 用于根据配置和插件类型（前置插件、普通插件和后置插件）解析和返回一个插件数组
+ * @param config
+ * @param prePlugins
+ * @param normalPlugins
+ * @param postPlugins
+ * @returns
+ */
+export async function resolvePlugins(
+  config: ResolvedConfig,
+  prePlugins: Plugin[],
+  normalPlugins: Plugin[],
+  postPlugins: Plugin[]
+): Promise<Plugin[]> {
+  const isBuild = config.command === "build";
+  const isWorker = config.isWorker;
+  const buildPlugins = isBuild
+    ? await (await import("../build")).resolveBuildPlugins(config)
+    : { pre: [], post: [] };
+  const { modulePreload } = config.build;
+
+  /** 判断是否启用依赖优化 */
+  const depsOptimizerEnabled =
+    !isBuild &&
+    (isDepsOptimizerEnabled(config, false) ||
+      isDepsOptimizerEnabled(config, true));
+
+  return [
+    // depsOptimizerEnabled ? optimizedDepsPlugin(config) : null,
+    // isBuild ? metadataPlugin() : null,
+    // !isWorker ? watchPackageDataPlugin(config.packageCache) : null,
+    // preAliasPlugin(config),
+    aliasPlugin({
+      entries: config.resolve.alias,
+      customResolver: viteAliasCustomResolver,
+    }),
+    ...prePlugins,
+    // modulePreload !== false && modulePreload.polyfill
+    //   ? modulePreloadPolyfillPlugin(config)
+    //   : null,
+    resolvePlugin({
+      ...config.resolve,
+      root: config.root,
+      isProduction: config.isProduction,
+      isBuild,
+      packageCache: config.packageCache,
+      ssrConfig: config.ssr,
+      asSrc: true,
+      fsUtils: getFsUtils(config),
+      // getDepsOptimizer: isBuild
+      //   ? undefined
+      //   : (ssr: boolean) => getDepsOptimizer(config, ssr),
+      // shouldExternalize:
+      //   isBuild && config.build.ssr
+      //     ? (id, importer) => shouldExternalizeForSSR(id, importer, config)
+      //     : undefined,
+    }),
+    // htmlInlineProxyPlugin(config),
+    // cssPlugin(config),
+    // config.esbuild !== false ? esbuildPlugin(config) : null,
+    // jsonPlugin(
+    //   {
+    //     namedExports: true,
+    //     ...config.json,
+    //   },
+    //   isBuild
+    // ),
+    // wasmHelperPlugin(config),
+    // webWorkerPlugin(config),
+    // assetPlugin(config),
+    ...normalPlugins,
+    // wasmFallbackPlugin(),
+    // definePlugin(config),
+    // cssPostPlugin(config),
+    // isBuild && buildHtmlPlugin(config),
+    // workerImportMetaUrlPlugin(config),
+    // assetImportMetaUrlPlugin(config),
+    ...buildPlugins.pre,
+    // dynamicImportVarsPlugin(config),
+    // importGlobPlugin(config),
+    ...postPlugins,
+    ...buildPlugins.post,
+    // internal server-only plugins are always applied after everything else
+    ...(isBuild
+      ? []
+      : [
+          // clientInjectionsPlugin(config),
+          // cssAnalysisPlugin(config),
+          // importAnalysisPlugin(config),
+        ]),
+  ].filter(Boolean) as Plugin[];
+}
 
 export function getHookHandler(hook: any) {
   return (typeof hook === "object" ? hook.handler : hook) as any;
@@ -107,3 +207,14 @@ export function getSortedPluginsByHook<K extends keyof Plugin>(
   //返回排序后的插件数组
   return sortedPlugins as PluginWithRequiredHook<K>[];
 }
+
+// Same as `@rollup/plugin-alias` default resolver, but we attach additional meta
+// if we can't resolve to something, which will error in `importAnalysis`
+export const viteAliasCustomResolver: ResolverFunction = async function (
+  id,
+  importer,
+  options
+) {
+  const resolved = await this.resolve(id, importer, options);
+  return resolved || { id, meta: { "vite:alias": { noResolved: true } } };
+};
