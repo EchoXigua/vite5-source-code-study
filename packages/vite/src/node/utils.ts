@@ -137,6 +137,71 @@ export function normalizePath(id: string): string {
   return path.posix.normalize(isWindows ? slash(id) : id);
 }
 
+/**匹配斜杠 / 或冒号 : */
+const replaceSlashOrColonRE = /[/:]/g;
+/**匹配点 . */
+const replaceDotRE = /\./g;
+/**
+ * 匹配嵌套关系符号 > 及其周围的空白字符
+ * 它匹配零个或多个空白字符（\s*），后跟一个 > 字符，再跟零个或多个空白字符（\s*）
+ */
+const replaceNestedIdRE = /(\s*>\s*)/g;
+/**匹配井号 # */
+const replaceHashRE = /#/g;
+
+/**
+ * 通过多次调用 replace 方法，将 ID 字符串中的特定字符替换为特定的字符串
+ * @param id
+ * @returns
+ */
+export const flattenId = (id: string): string => {
+  const flatId = limitFlattenIdLength(
+    id
+      // / 或 : 替换为 _
+      .replace(replaceSlashOrColonRE, "_")
+      // . 替换为 __
+      .replace(replaceDotRE, "__")
+      // 嵌套关系符号 > 及其周围的空白字符替换为 ___
+      .replace(replaceNestedIdRE, "___")
+      // # 替换为 ____
+      .replace(replaceHashRE, "____")
+  );
+  return flatId;
+};
+
+/**用于生成哈希值的长度 */
+const FLATTEN_ID_HASH_LENGTH = 8;
+/**扁平化 ID 的最大长度 */
+const FLATTEN_ID_MAX_FILE_LENGTH = 170;
+/**
+ *
+ * @param id
+ * @param limit
+ * @returns
+ */
+const limitFlattenIdLength = (
+  id: string,
+  limit: number = FLATTEN_ID_MAX_FILE_LENGTH
+): string => {
+  if (id.length <= limit) {
+    return id;
+  }
+  // 截取 ID 的前 limit - (FLATTEN_ID_HASH_LENGTH + 1) 个字符，并在其后附加一个下划线 _ 和 ID 的哈希值
+  return id.slice(0, limit - (FLATTEN_ID_HASH_LENGTH + 1)) + "_" + getHash(id);
+};
+
+/**
+ * 将匹配 replaceNestedIdRE 正则表达式的部分替换为 " > "
+ * @param id
+ * @returns 返回一个规范化后的字符串
+ * @example
+ * console.log(normalizeId("div>span"));       // "div > span"
+ * console.log(normalizeId("div > span"));     // "div > span"
+ * console.log(normalizeId("div    >    span"));// "div > span"
+ */
+export const normalizeId = (id: string): string =>
+  id.replace(replaceNestedIdRE, " > ");
+
 //Node.js（Node, Deno, Bun） 支持的内置模块命名空间前缀为 node:
 const NODE_BUILTIN_NAMESPACE = "node:";
 //Deno 支持的内置模块命名空间，前缀为 npm:。
@@ -1240,4 +1305,9 @@ export function lookupFile(
 
     dir = parentDir;
   }
+}
+
+const escapeRegexRE = /[-/\\^$*+?.()|[\]{}]/g;
+export function escapeRegex(str: string): string {
+  return str.replace(escapeRegexRE, "\\$&");
 }

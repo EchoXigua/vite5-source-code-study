@@ -6,21 +6,31 @@ import type {
   BuildContext,
   BuildOptions as EsbuildBuildOptions,
 } from "esbuild";
+import esbuild, { build } from "esbuild";
+import { init, parse } from "es-module-lexer";
+import glob from "fast-glob";
+
 import type { ResolvedConfig } from "../config";
 import { getDepOptimizationConfig } from "../config";
 import {
   createDebugger,
-  // flattenId,
+  flattenId,
   getHash,
-  // isOptimizable,
+  isOptimizable,
   lookupFile,
-  // normalizeId,
+  normalizeId,
   normalizePath,
   removeLeadingSlash,
   tryStatSync,
   unique,
 } from "../utils";
+import {
+  // defaultEsbuildSupported,
+  transformWithEsbuild,
+} from "../plugins/esbuild";
 import { ESBUILD_MODULES_TARGET, METADATA_FILENAME } from "../constants";
+import { createOptimizeDepsIncludeResolver, expandGlobIds } from "./resolve";
+import { scanImports } from "./scan";
 
 const debug = createDebugger("vite:deps");
 
@@ -671,4 +681,590 @@ function getOptimizedBrowserHash(
   timestamp = ""
 ) {
   return getHash(hash + JSON.stringify(deps) + timestamp);
+}
+
+/**
+ * 用于将手动包含在 optimizeDeps.include 中的依赖添加到依赖项记录中
+ * @param deps
+ * @param config
+ * @param ssr
+ */
+export async function addManuallyIncludedOptimizeDeps(
+  deps: Record<string, string>,
+  config: ResolvedConfig,
+  ssr: boolean
+): Promise<void> {
+  const { logger } = config;
+  // 获取依赖项优化配置
+  const optimizeDeps = getDepOptimizationConfig(config, ssr);
+  // 获取 optimizeDeps.include 数组，如果未定义则默认为空数组。
+  const optimizeDepsInclude = optimizeDeps?.include ?? [];
+
+  if (optimizeDepsInclude.length) {
+    /**
+     * 用于记录无法优化的依赖项
+     * @param id
+     * @param msg
+     */
+    const unableToOptimize = (id: string, msg: string) => {
+      if (optimizeDepsInclude.includes(id)) {
+        logger.warn(
+          `${msg}: ${colors.cyan(id)}, present in '${
+            ssr ? "ssr." : ""
+          }optimizeDeps.include'`
+        );
+      }
+    };
+
+    // 浅拷贝一份 include
+    const includes = [...optimizeDepsInclude];
+
+    /**
+     * 这一块代码的主要功能是处理动态模式（如通配符）并将其扩展为具体的依赖项 ID
+     * 这是为了确保 includes 数组中的每个元素都是具体的依赖项 ID，而不是动态模式
+     */
+    for (let i = 0; i < includes.length; i++) {
+      const id = includes[i];
+      // 如果发现动态模式，则扩展为具体的依赖项 ID 并插入到 includes 数组中
+
+      // 检查当前的 id 是否为动态模式（如通配符）
+      if (glob.isDynamicPattern(id)) {
+        // 将动态模式 id 扩展为具体的依赖项 ID 数组 globIds
+        const globIds = expandGlobIds(id, config);
+
+        // 将当前的动态模式 id 替换为扩展后的具体依赖项 ID 数组 globIds
+        includes.splice(i, 1, ...globIds);
+
+        // 调整索引,由于新插入的 ID 数组长度为 globIds.length，
+        // 因此需要增加 globIds.length - 1 来跳过这些新元素
+        // 这样可以确保在下一次循环时不会重复处理这些新插入的具体依赖项 ID
+        i += globIds.length - 1;
+      }
+    }
+
+    // 创建一个依赖项解析器
+    const resolve = createOptimizeDepsIncludeResolver(config, ssr);
+
+    // 遍历 includes 数组中的每个 ID。
+    for (const id of includes) {
+      // 规范化 ID（处理嵌套关系符号）以确保唯一性和可读性
+      //  'foo   >bar` as 'foo > bar'
+      const normalizedId = normalizeId(id);
+
+      // 如果 deps 对象中尚不存在该依赖项，则尝试解析该依赖项
+      if (!deps[normalizedId]) {
+        const entry = await resolve(id);
+        if (entry) {
+          // 如果解析成功且该依赖项可优化且未被标记为跳过优化，则将其添加到 deps 对象中
+          if (isOptimizable(entry, optimizeDeps)) {
+            if (!entry.endsWith("?__vite_skip_optimization")) {
+              deps[normalizedId] = entry;
+            }
+          } else {
+            // 不可优化，则记录警告信息
+            unableToOptimize(id, "Cannot optimize dependency");
+          }
+        } else {
+          // 解析失败,记录警告信息
+          unableToOptimize(id, "Failed to resolve dependency");
+        }
+      }
+    }
+  }
+}
+
+/**
+ * 这个函数将一个优化后的依赖信息添加到优化元数据中
+ * @param metadata
+ * @param type
+ * @param depInfo
+ * @returns
+ */
+export function addOptimizedDepInfo(
+  metadata: DepOptimizationMetadata,
+  type: "optimized" | "discovered" | "chunks",
+  depInfo: OptimizedDepInfo
+): OptimizedDepInfo {
+  metadata[type][depInfo.id] = depInfo;
+  metadata.depInfoList.push(depInfo);
+  return depInfo;
+}
+
+/**
+ * 这个函数将一组依赖转换为 OptimizedDepInfo 格式的记录
+ * @param config
+ * @param deps
+ * @param ssr
+ * @param timestamp
+ * @returns
+ */
+export function toDiscoveredDependencies(
+  config: ResolvedConfig,
+  deps: Record<string, string>,
+  ssr: boolean,
+  timestamp?: string
+): Record<string, OptimizedDepInfo> {
+  // 计算浏览器哈希，该哈希值结合了依赖哈希值和时间戳
+  const browserHash = getOptimizedBrowserHash(
+    getDepHash(config, ssr).hash,
+    deps,
+    timestamp
+  );
+
+  const discovered: Record<string, OptimizedDepInfo> = {};
+  // 遍历 deps，对于每个依赖项，生成一个 OptimizedDepInfo 对象，并添加到 discovered 记录中
+  for (const id in deps) {
+    const src = deps[id];
+    discovered[id] = {
+      id, // 依赖项的标识符
+      file: getOptimizedDepPath(id, config, ssr), //优化后的依赖文件路径
+      src, //依赖项的源路径
+      browserHash: browserHash,
+      exportsData: extractExportsData(src, config, ssr),
+    };
+  }
+  return discovered;
+}
+
+/**
+ * 这个函数生成优化后的依赖文件路径
+ * @param id
+ * @param config
+ * @param ssr
+ * @returns
+ */
+export function getOptimizedDepPath(
+  id: string,
+  config: ResolvedConfig,
+  ssr: boolean
+): string {
+  /**
+   * 通过 getDepsCacheDir 函数获取依赖缓存目录
+   * 通过 flattenId 将依赖项 id 转换为一个平坦的文件名
+   * 将依赖缓存目录和平坦文件名拼接，生成完整路径
+   * 通过 normalizePath 函数标准化路径
+   */
+  return normalizePath(
+    path.resolve(getDepsCacheDir(config, ssr), flattenId(id) + ".js")
+  );
+}
+
+/**
+ * 这个函数的主要目的是从指定的文件中提取导出数据，
+ * 判断该文件是否使用了模块语法，并根据需要进行代码转换
+ * @param filePath 要提取导出数据的文件路径
+ * @param config
+ * @param ssr
+ * @returns
+ */
+export async function extractExportsData(
+  filePath: string,
+  config: ResolvedConfig,
+  ssr: boolean
+): Promise<ExportsData> {
+  // 确保所有必要的初始化操作已完成
+  await init;
+
+  // 获取依赖优化配置
+  const optimizeDeps = getDepOptimizationConfig(config, ssr);
+
+  // 获取 esbuild 的配置选项
+  const esbuildOptions = optimizeDeps?.esbuildOptions ?? {};
+
+  // 处理自定义扩展名的文件
+  if (optimizeDeps.extensions?.some((ext) => filePath.endsWith(ext))) {
+    // 检查 filePath 是否匹配配置的自定义扩展名
+
+    // For custom supported extensions, build the entry file to transform it into JS,
+    // and then parse with es-module-lexer. Note that the `bundle` option is not `true`,
+    // so only the entry file is being transformed.
+    /**
+     * 对于自定义支持的扩展名，构建入口文件将其转换为 JavaScript
+     * 然后使用 es-module-lexer 解析。注意，`bundle` 选项并未启用
+     * 因此仅转换入口文件
+     *
+     * 在依赖优化的过程中，我们需要准确识别哪些模块在项目中被使用，以及它们导出了哪些内容。
+     * 这对于确保在开发环境下快速加载和处理依赖项至关重要。
+     *
+     * 1.自定义扩展名: 在项目配置中，可以指定一些自定义的文件扩展名，这些扩展名的文件需要特殊处理
+     * 例如，某些项目可能使用 .ts 或 .jsx 扩展名的文件
+     *
+     * 2. 构建入口文件: 使用 esbuild 构建这些入口文件，将它们转换为 JavaScript
+     * 这一步是必要的，因为许多工具和解析器（如 es-module-lexer）期望处理的是标准的 JavaScript 文件
+     *
+     * 3. es-module-lexer 解析: 转换完成后，使用 es-module-lexer 解析生成的 JavaScript 文件，提取其中的导出信息
+     *
+     * 4. bundle 选项未启用: 在构建过程中，未启用 bundle 选项。
+     * 这意味着 esbuild 只转换单个入口文件，而不是递归地将它的依赖项一起打包
+     * 这种方法可以提高构建速度，并确保只处理必要的部分
+     */
+
+    // 如果匹配，则使用 esbuild 构建该文件，将其转换为 JavaScript
+    const result = await build({
+      ...esbuildOptions,
+      entryPoints: [filePath],
+      write: false,
+      format: "esm",
+    });
+
+    // 解析生成的 JavaScript 文件，提取导出的符号和模块语法信息
+    const [, exports, , hasModuleSyntax] = parse(result.outputFiles[0].text);
+    return {
+      hasModuleSyntax,
+      exports: exports.map((e) => e.n),
+    };
+  }
+
+  // 处理常规文件
+
+  /**用于存储解析结果 */
+  let parseResult: ReturnType<typeof parse>;
+  /**标志是否使用了 JSX 加载器进行转换 */
+  let usedJsxLoader = false;
+
+  // 读取文件内容
+  const entryContent = await fsp.readFile(filePath, "utf-8");
+  try {
+    // 尝试使用 parse 函数直接解析文件内容
+    parseResult = parse(entryContent);
+  } catch {
+    // 解析失败处理
+
+    // 获取适当的加载器（如 JSX）用于转换文件内容
+    const loader = esbuildOptions.loader?.[path.extname(filePath)] || "jsx";
+    debug?.(
+      `Unable to parse: ${filePath}.\n Trying again with a ${loader} transform.`
+    );
+
+    // 将文件内容转换为 JavaScript
+    const transformed = await transformWithEsbuild(entryContent, filePath, {
+      loader,
+    });
+
+    // 转换后的代码再次使用 parse 函数进行解析
+    parseResult = parse(transformed.code);
+    // 设置为 true，表示使用了 JSX 加载器
+    usedJsxLoader = true;
+  }
+
+  // 构建 exportsData 对象
+  const [, exports, , hasModuleSyntax] = parseResult;
+  const exportsData: ExportsData = {
+    hasModuleSyntax,
+    exports: exports.map((e) => e.n),
+    jsxLoader: usedJsxLoader,
+  };
+  return exportsData;
+}
+
+/**
+ * 这个函数的目的是执行初始的依赖扫描，以发现需要预构建的依赖项，并包括用户手动指定的依赖项
+ * 它使用 esbuild 来进行快速扫描，目的是尽早找到需要打包的依赖项
+ * @param config
+ * @returns
+ */
+export function discoverProjectDependencies(config: ResolvedConfig): {
+  cancel: () => Promise<void>;
+  result: Promise<Record<string, string>>;
+} {
+  /**
+   * cancel: 一个函数，调用后会取消扫描任务
+   * result: 一个 Promise，其解析结果是一个对象，包含两个属性：
+   * deps: 发现的依赖项，格式为 { [id: string]: string }
+   * missing: 未能解析的依赖项，格式为 { [id: string]: string }，其中 id 是依赖项的标识符，值是其导入来源
+   */
+  const { cancel, result } = scanImports(config);
+
+  return {
+    cancel,
+    result: result.then(({ deps, missing }) => {
+      const missingIds = Object.keys(missing);
+      if (missingIds.length) {
+        throw new Error(
+          `The following dependencies are imported but could not be resolved:\n\n  ${missingIds
+            .map(
+              (id) =>
+                `${colors.cyan(id)} ${colors.white(
+                  colors.dim(`(imported by ${missing[id]})`)
+                )}`
+            )
+            .join(`\n  `)}\n\nAre they installed?`
+        );
+      }
+
+      return deps;
+    }),
+  };
+}
+
+/**
+ * Internally, Vite uses this function to prepare a optimizeDeps run. When Vite starts, we can get
+ * the metadata and start the server without waiting for the optimizeDeps processing to be completed
+ */
+export function runOptimizeDeps(
+  resolvedConfig: ResolvedConfig,
+  depsInfo: Record<string, OptimizedDepInfo>,
+  ssr: boolean
+): {
+  cancel: () => Promise<void>;
+  result: Promise<DepOptimizationResult>;
+} {
+  const optimizerContext = { cancelled: false };
+
+  const config: ResolvedConfig = {
+    ...resolvedConfig,
+    command: "build",
+  };
+
+  const depsCacheDir = getDepsCacheDir(resolvedConfig, ssr);
+  const processingCacheDir = getProcessingDepsCacheDir(resolvedConfig, ssr);
+
+  // Create a temporary directory so we don't need to delete optimized deps
+  // until they have been processed. This also avoids leaving the deps cache
+  // directory in a corrupted state if there is an error
+  fs.mkdirSync(processingCacheDir, { recursive: true });
+
+  // a hint for Node.js
+  // all files in the cache directory should be recognized as ES modules
+  debug?.(colors.green(`creating package.json in ${processingCacheDir}`));
+  fs.writeFileSync(
+    path.resolve(processingCacheDir, "package.json"),
+    `{\n  "type": "module"\n}\n`
+  );
+
+  const metadata = initDepsOptimizerMetadata(config, ssr);
+
+  metadata.browserHash = getOptimizedBrowserHash(
+    metadata.hash,
+    depsFromOptimizedDepInfo(depsInfo)
+  );
+
+  // We prebundle dependencies with esbuild and cache them, but there is no need
+  // to wait here. Code that needs to access the cached deps needs to await
+  // the optimizedDepInfo.processing promise for each dep
+
+  const qualifiedIds = Object.keys(depsInfo);
+  let cleaned = false;
+  let committed = false;
+  const cleanUp = () => {
+    // If commit was already called, ignore the clean up even if a cancel was requested
+    // This minimizes the chances of leaving the deps cache in a corrupted state
+    if (!cleaned && !committed) {
+      cleaned = true;
+      // No need to wait, we can clean up in the background because temp folders
+      // are unique per run
+      debug?.(colors.green(`removing cache dir ${processingCacheDir}`));
+      try {
+        // When exiting the process, `fsp.rm` may not take effect, so we use `fs.rmSync`
+        fs.rmSync(processingCacheDir, { recursive: true, force: true });
+      } catch (error) {
+        // Ignore errors
+      }
+    }
+  };
+
+  const successfulResult: DepOptimizationResult = {
+    metadata,
+    cancel: cleanUp,
+    commit: async () => {
+      if (cleaned) {
+        throw new Error(
+          "Can not commit a Deps Optimization run as it was cancelled"
+        );
+      }
+      // Ignore clean up requests after this point so the temp folder isn't deleted before
+      // we finish commiting the new deps cache files to the deps folder
+      committed = true;
+
+      // Write metadata file, then commit the processing folder to the global deps cache
+      // Rewire the file paths from the temporary processing dir to the final deps cache dir
+      const dataPath = path.join(processingCacheDir, METADATA_FILENAME);
+      debug?.(
+        colors.green(`creating ${METADATA_FILENAME} in ${processingCacheDir}`)
+      );
+      fs.writeFileSync(
+        dataPath,
+        stringifyDepsOptimizerMetadata(metadata, depsCacheDir)
+      );
+
+      // In order to minimize the time where the deps folder isn't in a consistent state,
+      // we first rename the old depsCacheDir to a temporary path, then we rename the
+      // new processing cache dir to the depsCacheDir. In systems where doing so in sync
+      // is safe, we do an atomic operation (at least for this thread). For Windows, we
+      // found there are cases where the rename operation may finish before it's done
+      // so we do a graceful rename checking that the folder has been properly renamed.
+      // We found that the rename-rename (then delete the old folder in the background)
+      // is safer than a delete-rename operation.
+      const temporaryPath = depsCacheDir + getTempSuffix();
+      const depsCacheDirPresent = fs.existsSync(depsCacheDir);
+      if (isWindows) {
+        if (depsCacheDirPresent) {
+          debug?.(colors.green(`renaming ${depsCacheDir} to ${temporaryPath}`));
+          await safeRename(depsCacheDir, temporaryPath);
+        }
+        debug?.(
+          colors.green(`renaming ${processingCacheDir} to ${depsCacheDir}`)
+        );
+        await safeRename(processingCacheDir, depsCacheDir);
+      } else {
+        if (depsCacheDirPresent) {
+          debug?.(colors.green(`renaming ${depsCacheDir} to ${temporaryPath}`));
+          fs.renameSync(depsCacheDir, temporaryPath);
+        }
+        debug?.(
+          colors.green(`renaming ${processingCacheDir} to ${depsCacheDir}`)
+        );
+        fs.renameSync(processingCacheDir, depsCacheDir);
+      }
+
+      // Delete temporary path in the background
+      if (depsCacheDirPresent) {
+        debug?.(colors.green(`removing cache temp dir ${temporaryPath}`));
+        fsp.rm(temporaryPath, { recursive: true, force: true });
+      }
+    },
+  };
+
+  if (!qualifiedIds.length) {
+    // No deps to optimize, we still commit the processing cache dir to remove
+    // the previous optimized deps if they exist, and let the next server start
+    // skip the scanner step if the lockfile hasn't changed
+    return {
+      cancel: async () => cleanUp(),
+      result: Promise.resolve(successfulResult),
+    };
+  }
+
+  const cancelledResult: DepOptimizationResult = {
+    metadata,
+    commit: async () => cleanUp(),
+    cancel: cleanUp,
+  };
+
+  const start = performance.now();
+
+  const preparedRun = prepareEsbuildOptimizerRun(
+    resolvedConfig,
+    depsInfo,
+    ssr,
+    processingCacheDir,
+    optimizerContext
+  );
+
+  const runResult = preparedRun.then(({ context, idToExports }) => {
+    function disposeContext() {
+      return context?.dispose().catch((e) => {
+        config.logger.error("Failed to dispose esbuild context", { error: e });
+      });
+    }
+    if (!context || optimizerContext.cancelled) {
+      disposeContext();
+      return cancelledResult;
+    }
+
+    return context
+      .rebuild()
+      .then((result) => {
+        const meta = result.metafile!;
+
+        // the paths in `meta.outputs` are relative to `process.cwd()`
+        const processingCacheDirOutputPath = path.relative(
+          process.cwd(),
+          processingCacheDir
+        );
+
+        for (const id in depsInfo) {
+          const output = esbuildOutputFromId(
+            meta.outputs,
+            id,
+            processingCacheDir
+          );
+
+          const { exportsData, ...info } = depsInfo[id];
+          addOptimizedDepInfo(metadata, "optimized", {
+            ...info,
+            // We only need to hash the output.imports in to check for stability, but adding the hash
+            // and file path gives us a unique hash that may be useful for other things in the future
+            fileHash: getHash(
+              metadata.hash + depsInfo[id].file + JSON.stringify(output.imports)
+            ),
+            browserHash: metadata.browserHash,
+            // After bundling we have more information and can warn the user about legacy packages
+            // that require manual configuration
+            needsInterop: needsInterop(
+              config,
+              ssr,
+              id,
+              idToExports[id],
+              output
+            ),
+          });
+        }
+
+        for (const o of Object.keys(meta.outputs)) {
+          if (!jsMapExtensionRE.test(o)) {
+            const id = path
+              .relative(processingCacheDirOutputPath, o)
+              .replace(jsExtensionRE, "");
+            const file = getOptimizedDepPath(id, resolvedConfig, ssr);
+            if (
+              !findOptimizedDepInfoInRecord(
+                metadata.optimized,
+                (depInfo) => depInfo.file === file
+              )
+            ) {
+              addOptimizedDepInfo(metadata, "chunks", {
+                id,
+                file,
+                needsInterop: false,
+                browserHash: metadata.browserHash,
+              });
+            }
+          }
+        }
+
+        debug?.(
+          `Dependencies bundled in ${(performance.now() - start).toFixed(2)}ms`
+        );
+
+        return successfulResult;
+      })
+
+      .catch((e) => {
+        if (e.errors && e.message.includes("The build was canceled")) {
+          // esbuild logs an error when cancelling, but this is expected so
+          // return an empty result instead
+          return cancelledResult;
+        }
+        throw e;
+      })
+      .finally(() => {
+        return disposeContext();
+      });
+  });
+
+  runResult.catch(() => {
+    cleanUp();
+  });
+
+  return {
+    async cancel() {
+      optimizerContext.cancelled = true;
+      const { context } = await preparedRun;
+      await context?.cancel();
+      cleanUp();
+    },
+    result: runResult,
+  };
+}
+
+// Convert to { id: src }
+export function depsFromOptimizedDepInfo(
+  depsInfo: Record<string, OptimizedDepInfo>
+): Record<string, string> {
+  const obj: Record<string, string> = {};
+  for (const key in depsInfo) {
+    obj[key] = depsInfo[key].src!;
+  }
+  return obj;
 }
