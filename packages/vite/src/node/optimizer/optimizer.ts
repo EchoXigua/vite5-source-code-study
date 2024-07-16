@@ -1,7 +1,24 @@
 import colors from "picocolors";
 import { createDebugger, getHash, promiseWithResolvers } from "../utils";
 import type { ResolvedConfig, ViteDevServer } from "..";
-import type { DepsOptimizer } from ".";
+import { getDepOptimizationConfig } from "../config";
+import {
+  // addManuallyIncludedOptimizeDeps,
+  // addOptimizedDepInfo,
+  createIsOptimizedDepFile,
+  createIsOptimizedDepUrl,
+  // depsFromOptimizedDepInfo,
+  depsLogString,
+  // discoverProjectDependencies,
+  // extractExportsData,
+  // getOptimizedDepPath,
+  initDepsOptimizerMetadata,
+  loadCachedDepOptimizationMetadata,
+  // optimizeServerSsrDeps,
+  // runOptimizeDeps,
+  // toDiscoveredDependencies,
+} from ".";
+import type { DepOptimizationResult, DepsOptimizer, OptimizedDepInfo } from ".";
 
 const debug = createDebugger("vite:deps");
 
@@ -24,47 +41,77 @@ export async function initDepsOptimizer(
   }
 }
 
+/**
+ * 这个函数是 Vite 的依赖优化器，用于管理依赖的优化过程
+ * 这个函数相当复杂，涉及到多个步骤和状态管理
+ * @param config
+ * @param server
+ */
 async function createDepsOptimizer(
   config: ResolvedConfig,
   server: ViteDevServer
 ): Promise<void> {
   const { logger } = config;
   const ssr = false;
+  // 当前时间戳，作为会话标识
   const sessionTimestamp = Date.now().toString();
 
+  // 加载缓存的依赖优化元数据
   const cachedMetadata = await loadCachedDepOptimizationMetadata(config, ssr);
 
+  // 用于处理防抖操作的计时器
   let debounceProcessingHandle: NodeJS.Timeout | undefined;
 
+  // 标记优化器是否已关闭
   let closed = false;
 
+  // 初始化元数据
   let metadata =
     cachedMetadata || initDepsOptimizerMetadata(config, ssr, sessionTimestamp);
 
+  // 获取依赖优化的配置选项
   const options = getDepOptimizationConfig(config, ssr);
 
+  /**
+   *  noDiscovery 设置为 true 时，依赖优化器不会自动发现和处理新的依赖
+   * 这个选项通常用于某些特定情况下，不希望在优化过程中自动发现新依赖，
+   * 例如在一个固定的依赖环境下，防止不必要的依赖更新或添加
+   *
+   *  holdUntilCrawlEnd 设置为 true 时，依赖优化器会在爬取（crawl）依赖的过程中暂停优化，直到爬取过程结束
+   * 这个选项通常用于需要先全面收集依赖信息，然后再进行优化的场景，确保在优化之前已经完全了解所有依赖关系
+   *
+   * 这两个选项可以在一定程度上控制依赖优化的行为，提供更灵活和精细的依赖管理策略
+   */
   const { noDiscovery, holdUntilCrawlEnd } = options;
 
   const depsOptimizer: DepsOptimizer = {
-    metadata,
-    registerMissingImport,
-    run: () => debouncedProcessing(0),
+    metadata, //依赖优化的元数据
+    registerMissingImport, //注册缺失的导入
+    run: () => debouncedProcessing(0), //启动防抖处理
+    // 建判断是否为优化依赖文件的函数
     isOptimizedDepFile: createIsOptimizedDepFile(config),
+    // 创建判断是否为优化依赖 URL 的函数
     isOptimizedDepUrl: createIsOptimizedDepUrl(config),
+    // 获取优化依赖的 ID，通过依赖信息的 file 和 browserHash 生成
     getOptimizedDepId: (depInfo: OptimizedDepInfo) =>
       `${depInfo.file}?v=${depInfo.browserHash}`,
-    close,
-    options,
+    close, //关闭优化器的函数
+    options, //优化器的配置选项
   };
 
+  // 设置缓存
   depsOptimizerMap.set(config, depsOptimizer);
 
+  // 标记是否发现了新依赖
   let newDepsDiscovered = false;
 
+  // 用于记录新发现的依赖
   let newDepsToLog: string[] = [];
+  // 用于处理新依赖日志的计时器
   let newDepsToLogHandle: NodeJS.Timeout | undefined;
   const logNewlyDiscoveredDeps = () => {
     if (newDepsToLog.length) {
+      // 使用 config.logger.info 打印新依赖日志，并将 newDepsToLog 清空。
       config.logger.info(
         colors.green(
           `✨ new dependencies optimized: ${depsLogString(newDepsToLog)}`
@@ -77,9 +124,12 @@ async function createDepsOptimizer(
     }
   };
 
+  /**用于存储在扫描期间发现的依赖项 */
   let discoveredDepsWhileScanning: string[] = [];
+  /** 该函数用于记录扫描期间发现的依赖项 */
   const logDiscoveredDepsWhileScanning = () => {
     if (discoveredDepsWhileScanning.length) {
+      // 如果扫描期间发现的依赖项存在，则记录日志信息，并且清空依赖项数组
       config.logger.info(
         colors.green(
           `✨ discovered while scanning: ${depsLogString(
@@ -94,8 +144,12 @@ async function createDepsOptimizer(
     }
   };
 
+  /**初始化一个处理依赖优化的 Promise */
   let depOptimizationProcessing = promiseWithResolvers<void>();
+  /**用于存储依赖优化处理队列中的 Promise */
   let depOptimizationProcessingQueue: PromiseWithResolvers<void>[] = [];
+
+  /**该函数用于解析（resolve）所有在队列中的处理 Promise */
   const resolveEnqueuedProcessingPromises = () => {
     // Resolve all the processings (including the ones which were delayed)
     for (const processing of depOptimizationProcessingQueue) {
@@ -104,22 +158,41 @@ async function createDepsOptimizer(
     depOptimizationProcessingQueue = [];
   };
 
+  /**用于存储需要重新运行的函数 */
   let enqueuedRerun: (() => void) | undefined;
+  /**标记当前是否正在进行依赖优化处理 */
   let currentlyProcessing = false;
 
+  /**标记是否已经进行过首次依赖优化处理 */
   let firstRunCalled = !!cachedMetadata;
+  /**标记是否需要警告遗漏的依赖项 */
   let warnAboutMissedDependencies = false;
 
-  // If this is a cold run, we wait for static imports discovered
-  // from the first request before resolving to minimize full page reloads.
-  // On warm start or after the first optimization is run, we use a simpler
-  // debounce strategy each time a new dep is discovered.
+  /**
+   * 这段代码的目的是为了优化依赖的首次加载和后续的依赖发现过程
+   *
+   * 1. 冷启动：
+   * 在冷启动时（没有缓存的元数据），会等待首次请求中发现的静态导入（static imports）
+   * 此时，代码会监听 onCrawlEnd 事件，即等待爬取静态导入完成后再继续。
+   * 这么做的目的是为了确保在首次加载时尽可能减少页面重新加载的次数，从而提高用户体验
+   *
+   * 2. 热启动：
+   * 在热启动或首次优化之后，每次发现新的依赖项时，采用一个更简单的去抖动（debounce）策略进行处理
+   * 这意味着不需要等待爬取结束，可以更快地处理新发现的依赖项，从而提高整体的响应速度
+   */
+  /**用于标记是否正在等待依赖爬取结束 */
   let waitingForCrawlEnd = false;
   if (!cachedMetadata) {
+    // 检查是否有缓存的元数据，如果没有缓存的元数据，则意味着这是一个冷启动
+
+    // 如果是冷启动，代码会注册一个回调函数 onCrawlEnd，该回调函数将在爬取静态导入完成时被调用。
     server._onCrawlEnd(onCrawlEnd);
+
+    // 设置为true 表示当前正在等待依赖爬取结束
     waitingForCrawlEnd = true;
   }
 
+  /**用于存储依赖优化的结果 */
   let optimizationResult:
     | {
         cancel: () => Promise<void>;
@@ -127,6 +200,7 @@ async function createDepsOptimizer(
       }
     | undefined;
 
+  /**用于存储发现依赖的结果 */
   let discover:
     | {
         cancel: () => Promise<void>;
@@ -134,11 +208,18 @@ async function createDepsOptimizer(
       }
     | undefined;
 
+  /**
+   *  这个函数用于关闭依赖优化器，并确保所有正在进行的任务都被取消或完成。
+   */
   async function close() {
+    // 设置为 true，表示优化器已关闭
     closed = true;
     await Promise.allSettled([
+      // 取消依赖发现任务
       discover?.cancel(),
+      // 等待依赖扫描任务完成
       depsOptimizer.scanProcessing,
+      // 取消优化结果任务
       optimizationResult?.cancel(),
     ]);
   }

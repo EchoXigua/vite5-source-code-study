@@ -144,3 +144,5 @@ export const wildcardHosts = new Set([
 ]);
 
 export const DEP_VERSION_RE = /[?&](v=[\w.-]+)\b/;
+
+export const METADATA_FILENAME = "_metadata.json";

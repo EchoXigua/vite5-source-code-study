@@ -52,18 +52,22 @@ export async function resolvePlugins(
     //   ? modulePreloadPolyfillPlugin(config)
     //   : null,
     resolvePlugin({
+      // 将 config.resolve 对象中的所有属性展开并传递给 resolvePlugin
+      // 这通常包括解析模块时使用的一些选项，如别名、扩展名等
       ...config.resolve,
-      root: config.root,
-      isProduction: config.isProduction,
-      isBuild,
-      packageCache: config.packageCache,
-      ssrConfig: config.ssr,
+      root: config.root, //根目录
+      isProduction: config.isProduction, //指示当前环境是否为生产环境
+      isBuild, //当前是否处于构建模式
+      packageCache: config.packageCache, //缓存的包数据。用于加速模块解析和构建过程
+      ssrConfig: config.ssr, //指定 SSR 相关的选项和设置
+      // 指示是否以源代码的形式处理文件。这可能影响模块的解析和处理方式，通常用于开发模式下的动态导入等
       asSrc: true,
-      fsUtils: getFsUtils(config),
-      /**这里很重要,是vite 依赖预构建缓存的处理 */
+      fsUtils: getFsUtils(config), //文件系统工具
+      /**这里很重要,涉及到 vite 依赖预构建缓存的处理,这里是获取依赖缓存的值 */
       getDepsOptimizer: isBuild
         ? undefined
         : (ssr: boolean) => getDepsOptimizer(config, ssr),
+      // 用于确定某个模块是否应该被外部化的函数
       shouldExternalize:
         isBuild && config.build.ssr
           ? (id, importer) => shouldExternalizeForSSR(id, importer, config)

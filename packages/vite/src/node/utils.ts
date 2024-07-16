@@ -1225,3 +1225,19 @@ export const isNonDriveRelativeAbsolutePath = (p: string): boolean => {
   if (!isWindows) return p[0] === "/";
   return windowsDrivePathPrefixRE.test(p);
 };
+
+export function lookupFile(
+  dir: string,
+  fileNames: string[]
+): string | undefined {
+  while (dir) {
+    for (const fileName of fileNames) {
+      const fullPath = path.join(dir, fileName);
+      if (tryStatSync(fullPath)?.isFile()) return fullPath;
+    }
+    const parentDir = path.dirname(dir);
+    if (parentDir === dir) return;
+
+    dir = parentDir;
+  }
+}
