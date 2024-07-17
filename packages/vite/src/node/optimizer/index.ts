@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
+import { promisify } from "node:util";
 import colors from "picocolors";
 import type {
   BuildContext,
@@ -25,14 +26,19 @@ import {
   unique,
 } from "../utils";
 import {
-  // defaultEsbuildSupported,
+  defaultEsbuildSupported,
   transformWithEsbuild,
 } from "../plugins/esbuild";
 import { ESBUILD_MODULES_TARGET, METADATA_FILENAME } from "../constants";
 import { createOptimizeDepsIncludeResolver, expandGlobIds } from "./resolve";
 import { scanImports } from "./scan";
+import { isWindows } from "../../shared/utils";
+import { esbuildCjsExternalPlugin, esbuildDepPlugin } from "./esbuildDepPlugin";
 
 const debug = createDebugger("vite:deps");
+
+const jsExtensionRE = /\.js$/i;
+const jsMapExtensionRE = /\.js\.map$/i;
 
 export {
   initDepsOptimizer,
@@ -492,6 +498,23 @@ function getDepsCacheSuffix(ssr: boolean): string {
 
 export function getDepsCacheDir(config: ResolvedConfig, ssr: boolean): string {
   return getDepsCacheDirPrefix(config) + getDepsCacheSuffix(ssr);
+}
+
+function getProcessingDepsCacheDir(config: ResolvedConfig, ssr: boolean) {
+  return (
+    getDepsCacheDirPrefix(config) + getDepsCacheSuffix(ssr) + getTempSuffix()
+  );
+}
+
+function getTempSuffix() {
+  return (
+    "_temp_" +
+    getHash(
+      `${process.pid}:${Date.now().toString()}:${Math.random()
+        .toString(16)
+        .slice(2)}`
+    )
+  );
 }
 
 function parseDepsOptimizerMetadata(
@@ -998,8 +1021,13 @@ export function discoverProjectDependencies(config: ResolvedConfig): {
 }
 
 /**
- * Internally, Vite uses this function to prepare a optimizeDeps run. When Vite starts, we can get
- * the metadata and start the server without waiting for the optimizeDeps processing to be completed
+ * 它在 Vite 启动时准备运行 optimizeDeps，并且在不需要等待 optimizeDeps 处理完成的情况下启动服务器
+ * 核心是通过esbuild 来处理结果
+ *
+ * @param resolvedConfig Vite 解析后的配置
+ * @param depsInfo 依赖信息的记录
+ * @param ssr
+ * @returns
  */
 export function runOptimizeDeps(
   resolvedConfig: ResolvedConfig,
@@ -1009,31 +1037,44 @@ export function runOptimizeDeps(
   cancel: () => Promise<void>;
   result: Promise<DepOptimizationResult>;
 } {
+  // 初始化优化器上下文和配置
   const optimizerContext = { cancelled: false };
 
+  // 将其命令设置为 "build"
   const config: ResolvedConfig = {
     ...resolvedConfig,
     command: "build",
   };
 
+  /**依赖缓存目录 */
   const depsCacheDir = getDepsCacheDir(resolvedConfig, ssr);
+  /**处理缓存目录，这是一个临时目录 */
   const processingCacheDir = getProcessingDepsCacheDir(resolvedConfig, ssr);
 
-  // Create a temporary directory so we don't need to delete optimized deps
-  // until they have been processed. This also avoids leaving the deps cache
-  // directory in a corrupted state if there is an error
+  /**
+   * 这里解释为什么创建一个临时目录是有必要的
+   *
+   * 1. 创建一个临时目录的主要目的是为了在优化依赖（optimized deps）被处理完之前不需要删除它们
+   * 临时目录的存在可以确保在整个优化过程结束之前，所有的依赖文件都安全地保存在一个隔离的地方
+   * 2. 如果在处理依赖过程中出现错误，临时目录的使用可以避免将依赖缓存目录（deps cache directory）
+   * 留在一个损坏的状态。这意味着，即使过程中出现问题，原本的依赖缓存目录仍然保持完整和未受影响。
+   */
+
+  //  确保所有嵌套的子目录也会被创建
   fs.mkdirSync(processingCacheDir, { recursive: true });
 
-  // a hint for Node.js
-  // all files in the cache directory should be recognized as ES modules
   debug?.(colors.green(`creating package.json in ${processingCacheDir}`));
+  // 在 processingCacheDir 目录中创建并写入一个 package.json 文件
+  // 这个 package.json 文件的内容是 {"type": "module"}，这会提示 Node.js 将目录中的所有文件识别为 ES 模块
   fs.writeFileSync(
     path.resolve(processingCacheDir, "package.json"),
     `{\n  "type": "module"\n}\n`
   );
 
+  // 初始化依赖优化器的元数据
   const metadata = initDepsOptimizerMetadata(config, ssr);
 
+  // 算浏览器哈希值：用于标识优化后的依赖在浏览器中的唯一性
   metadata.browserHash = getOptimizedBrowserHash(
     metadata.hash,
     depsFromOptimizedDepInfo(depsInfo)
@@ -1042,20 +1083,35 @@ export function runOptimizeDeps(
   // We prebundle dependencies with esbuild and cache them, but there is no need
   // to wait here. Code that needs to access the cached deps needs to await
   // the optimizedDepInfo.processing promise for each dep
+  /**
+   * 这段注释解释了依赖项的预打包和缓存机制，以及代码如何访问这些缓存的依赖项
+   *
+   * 1. 预打包依赖项并缓存：依赖项会通过 esbuild 进行预打包，并且结果会被缓存起来。
+   * 预打包的目的是为了提高依赖项加载的性能和效率。
+   * 预打包和缓存的过程可以在后台进行，代码不需要等待预打包和缓存完成就可以继续执行
+   * 这种非阻塞的方式可以提高代码执行效率
+   *
+   * 2. 访问缓存的依赖项：如果代码需要访问已经缓存的依赖项，需要等待每个依赖项的 optimizedDepInfo.processing 这个Promise
+   * 这是因为依赖项的预打包和缓存是异步操作，代码需要等待这些操作完成才能确保依赖项已经被正确缓存
+   */
 
+  /**存储 depsInfo 对象的所有键（即依赖项的 ID） */
   const qualifiedIds = Object.keys(depsInfo);
+  // 用于跟踪是否已经执行了清理或提交操作
   let cleaned = false;
   let committed = false;
+
+  /**清理函数 */
   const cleanUp = () => {
-    // If commit was already called, ignore the clean up even if a cancel was requested
-    // This minimizes the chances of leaving the deps cache in a corrupted state
+    // 如果提交操作已经执行，即使请求取消也会忽略清理操作。
+    // 这样做的目的是为了减少依赖缓存目录（deps cache）处于损坏状态的风险
     if (!cleaned && !committed) {
       cleaned = true;
-      // No need to wait, we can clean up in the background because temp folders
-      // are unique per run
+
+      // 清理可以在后台进行，因为临时文件夹是每次运行唯一的。无需等待清理完成，清理可以异步进行
       debug?.(colors.green(`removing cache dir ${processingCacheDir}`));
       try {
-        // When exiting the process, `fsp.rm` may not take effect, so we use `fs.rmSync`
+        // 使用 fs.rmSync 同步地删除 processingCacheDir 目录，因为在进程退出时，异步的 fsp.rm 可能不会生效
         fs.rmSync(processingCacheDir, { recursive: true, force: true });
       } catch (error) {
         // Ignore errors
@@ -1072,69 +1128,113 @@ export function runOptimizeDeps(
           "Can not commit a Deps Optimization run as it was cancelled"
         );
       }
-      // Ignore clean up requests after this point so the temp folder isn't deleted before
-      // we finish commiting the new deps cache files to the deps folder
+      // 在这个步骤之后，不再处理清理请求，以确保在完成新依赖缓存文件提交之前，临时文件夹不会被删除
+      // 一旦 committed 被设置为 true，cleanUp 函数的逻辑将不再执行删除操作
+      // 这是为了避免在提交过程中临时文件夹被意外删除，从而导致依赖缓存目录不一致或损坏
       committed = true;
 
-      // Write metadata file, then commit the processing folder to the global deps cache
-      // Rewire the file paths from the temporary processing dir to the final deps cache dir
+      // 下面代码的主要作用就是：写入元数据文件,将处理文件夹提交到全局依赖缓存,
+      // 将临时处理目录的文件路径重定向到最终依赖缓存目录
+
+      // 获取元数据路径
       const dataPath = path.join(processingCacheDir, METADATA_FILENAME);
       debug?.(
         colors.green(`creating ${METADATA_FILENAME} in ${processingCacheDir}`)
       );
+
+      // 写入元数据文件：确保处理目录中包含最新的依赖优化元数据
       fs.writeFileSync(
         dataPath,
         stringifyDepsOptimizerMetadata(metadata, depsCacheDir)
       );
 
-      // In order to minimize the time where the deps folder isn't in a consistent state,
-      // we first rename the old depsCacheDir to a temporary path, then we rename the
-      // new processing cache dir to the depsCacheDir. In systems where doing so in sync
-      // is safe, we do an atomic operation (at least for this thread). For Windows, we
-      // found there are cases where the rename operation may finish before it's done
-      // so we do a graceful rename checking that the folder has been properly renamed.
-      // We found that the rename-rename (then delete the old folder in the background)
-      // is safer than a delete-rename operation.
+      /**
+       * 源码中这段注释解释了在重命名和删除依赖缓存目录时采取的步骤和原因：
+       *
+       * 1. 通过在重命名过程中采取一些措施，尽量减少依赖缓存目录不一致的时间
+       *
+       * 2. 先将旧的依赖缓存目录重命名到一个临时路径，再将新的处理缓存目录重命名为最终的依赖缓存目录，
+       * 可以确保在整个过程中，依赖缓存目录始终处于一致状态
+       *
+       * 3. 在那些可以安全同步完成重命名操作的系统中，执行原子操作（至少对于当前线程而言），以确保操作的一致性
+       *
+       * 4. 在 Windows 系统中，重命名操作有时会提前结束，但实际上并未完成
+       * 因此，需要进行优雅的重命名操作，确保文件夹已经正确重命名
+       *
+       * 5. 通过先重命名旧文件夹再重命名新文件夹（然后在后台删除旧文件夹）的方式，
+       * 比直接删除旧文件夹再重命名新文件夹更加安全
+       *
+       */
+
+      /**旧的依赖缓存目录加上一个临时后缀，用于生成临时路径 */
       const temporaryPath = depsCacheDir + getTempSuffix();
+
+      /**检查 depsCacheDir 目录是否存在 */
       const depsCacheDirPresent = fs.existsSync(depsCacheDir);
       if (isWindows) {
+        // Windows 系统的重命名操作
         if (depsCacheDirPresent) {
+          // 缓存目录存在
           debug?.(colors.green(`renaming ${depsCacheDir} to ${temporaryPath}`));
+
+          // 将 depsCacheDir 重命名为 temporaryPath safeRename 是异步函数
           await safeRename(depsCacheDir, temporaryPath);
         }
         debug?.(
           colors.green(`renaming ${processingCacheDir} to ${depsCacheDir}`)
         );
+
+        // 将 processingCacheDir 重命名为 depsCacheDir
         await safeRename(processingCacheDir, depsCacheDir);
       } else {
+        // 非 Windows 系统的重命名操作
         if (depsCacheDirPresent) {
           debug?.(colors.green(`renaming ${depsCacheDir} to ${temporaryPath}`));
+          // 将 depsCacheDir 重命名为 temporaryPath，renameSync 是同步函数
           fs.renameSync(depsCacheDir, temporaryPath);
         }
         debug?.(
           colors.green(`renaming ${processingCacheDir} to ${depsCacheDir}`)
         );
+        // 将 processingCacheDir 重命名为 depsCacheDir
         fs.renameSync(processingCacheDir, depsCacheDir);
       }
 
       // Delete temporary path in the background
       if (depsCacheDirPresent) {
         debug?.(colors.green(`removing cache temp dir ${temporaryPath}`));
+        // 台删除临时目录 temporaryPath
         fsp.rm(temporaryPath, { recursive: true, force: true });
       }
     },
   };
 
+  // 检查是否有依赖项需要优化
   if (!qualifiedIds.length) {
     // No deps to optimize, we still commit the processing cache dir to remove
     // the previous optimized deps if they exist, and let the next server start
     // skip the scanner step if the lockfile hasn't changed
+
+    /**
+     * 这段注释解释了在没有需要优化的依赖项时，为什么依然需要处理临时缓存目录
+     *
+     * 1. 即使没有需要优化的依赖项，仍然需要提交处理缓存目录（processingCacheDir），以确保删除之前可能存在的优化依赖项。
+     * 这有助于清理过时的缓存数据，并保持依赖缓存目录的整洁。
+     *
+     * 2. 为下一次优化或服务器启动做好准备
+     *
+     * 3. 如果 lockfile（如 package-lock.json 或 yarn.lock）没有发生变化，则跳过扫描步骤
+     * 这是因为锁文件的变化通常表示依赖项的变更，而锁文件没有变化通常表示依赖项没有变化，因此可以省略不必要的扫描
+     */
+
+    // 如果没有依赖项需要优化，直接返回成功的结果并处理清理操作
     return {
       cancel: async () => cleanUp(),
       result: Promise.resolve(successfulResult),
     };
   }
 
+  /** 用于处理优化被取消的情况 */
   const cancelledResult: DepOptimizationResult = {
     metadata,
     commit: async () => cleanUp(),
@@ -1143,54 +1243,73 @@ export function runOptimizeDeps(
 
   const start = performance.now();
 
+  // 用于准备 esbuild 优化器的运行
   const preparedRun = prepareEsbuildOptimizerRun(
-    resolvedConfig,
-    depsInfo,
+    resolvedConfig, // 已解析的配置
+    depsInfo, // 依赖项的信息
     ssr,
-    processingCacheDir,
-    optimizerContext
+    processingCacheDir, // 处理缓存目录
+    optimizerContext // 优化器上下文
   );
 
+  /**
+   * 这里是处理 esbuild 的优化结果，并处理优化过程中可能出现的各种情况
+   */
   const runResult = preparedRun.then(({ context, idToExports }) => {
+    // context 是 esbuild 的构建上下文，idToExports 是模块的导出信息映射
+
+    /**
+     * 用于处理 esbuild 上下文的清理。即使在处理过程中发生错误，也会尝试记录错误日志。
+     * @returns
+     */
     function disposeContext() {
       return context?.dispose().catch((e) => {
         config.logger.error("Failed to dispose esbuild context", { error: e });
       });
     }
+
+    // context 不存在或者优化器上下文已被取消
     if (!context || optimizerContext.cancelled) {
+      // 这处理了优化过程被取消的情况，避免了不必要的操作
       disposeContext();
       return cancelledResult;
     }
 
+    // 调用 rebuild 方法重新构建。该方法会返回一个包含构建结果的 Promise
     return context
       .rebuild()
       .then((result) => {
         const meta = result.metafile!;
 
-        // the paths in `meta.outputs` are relative to `process.cwd()`
+        // 缓存输出路径
         const processingCacheDirOutputPath = path.relative(
           process.cwd(),
           processingCacheDir
         );
 
+        // 遍历 depsInfo
         for (const id in depsInfo) {
+          // 从 meta.outputs 中提取每个依赖项的输出。
           const output = esbuildOutputFromId(
             meta.outputs,
             id,
             processingCacheDir
           );
 
+          // 提取 exportsData 和其他属性，exportsData 是关于模块导出的数据
           const { exportsData, ...info } = depsInfo[id];
+          // 将优化后的依赖项信息添加到 metadata 对象中
           addOptimizedDepInfo(metadata, "optimized", {
             ...info,
-            // We only need to hash the output.imports in to check for stability, but adding the hash
-            // and file path gives us a unique hash that may be useful for other things in the future
+            // 生成一个唯一的文件哈希值，用于标识优化后的依赖项
+            // 这个哈希值用于检查依赖项的稳定性，确保依赖项在不同优化运行中的一致性
             fileHash: getHash(
               metadata.hash + depsInfo[id].file + JSON.stringify(output.imports)
             ),
             browserHash: metadata.browserHash,
             // After bundling we have more information and can warn the user about legacy packages
             // that require manual configuration
+            // 计算是否需要额外的兼容性处理，如 esm 和cjs 混用
             needsInterop: needsInterop(
               config,
               ssr,
@@ -1201,18 +1320,27 @@ export function runOptimizeDeps(
           });
         }
 
+        // 处理输出文件，并将其中的 JavaScript 文件路径转换为优化后的依赖项信息
         for (const o of Object.keys(meta.outputs)) {
+          // 检查文件路径是否匹配.js.map 结尾，过滤到sourcemap 文件的处理
           if (!jsMapExtensionRE.test(o)) {
+            // 处理不匹配的情况
+
+            // 计算文件的相对路径并去掉文件扩展名（.js）
             const id = path
               .relative(processingCacheDirOutputPath, o)
               .replace(jsExtensionRE, "");
+
+            // 获取优化后的依赖文件路径
             const file = getOptimizedDepPath(id, resolvedConfig, ssr);
             if (
+              // 检查 metadata.optimized 中是否已存在该文件的优化依赖项信息
               !findOptimizedDepInfoInRecord(
                 metadata.optimized,
                 (depInfo) => depInfo.file === file
               )
             ) {
+              // 如果没有找到相应的优化依赖项信息，将新的优化信息添加到 metadata 的 "chunks" 部分
               addOptimizedDepInfo(metadata, "chunks", {
                 id,
                 file,
@@ -1268,3 +1396,264 @@ export function depsFromOptimizedDepInfo(
   }
   return obj;
 }
+
+/**
+ * Stringify metadata for deps cache. Remove processing promises
+ * and individual dep info browserHash. Once the cache is reload
+ * the next time the server start we need to use the global
+ * browserHash to allow long term caching
+ */
+function stringifyDepsOptimizerMetadata(
+  metadata: DepOptimizationMetadata,
+  depsCacheDir: string
+) {
+  const { hash, configHash, lockfileHash, browserHash, optimized, chunks } =
+    metadata;
+  return JSON.stringify(
+    {
+      hash,
+      configHash,
+      lockfileHash,
+      browserHash,
+      optimized: Object.fromEntries(
+        Object.values(optimized).map(
+          ({ id, src, file, fileHash, needsInterop }) => [
+            id,
+            {
+              src,
+              file,
+              fileHash,
+              needsInterop,
+            },
+          ]
+        )
+      ),
+      chunks: Object.fromEntries(
+        Object.values(chunks).map(({ id, file }) => [id, { file }])
+      ),
+    },
+    (key: string, value: string) => {
+      // Paths can be absolute or relative to the deps cache dir where
+      // the _metadata.json is located
+      if (key === "file" || key === "src") {
+        return normalizePath(path.relative(depsCacheDir, value));
+      }
+      return value;
+    },
+    2
+  );
+}
+
+async function prepareEsbuildOptimizerRun(
+  resolvedConfig: ResolvedConfig,
+  depsInfo: Record<string, OptimizedDepInfo>,
+  ssr: boolean,
+  processingCacheDir: string,
+  optimizerContext: { cancelled: boolean }
+): Promise<{
+  context?: BuildContext;
+  idToExports: Record<string, ExportsData>;
+}> {
+  const config: ResolvedConfig = {
+    ...resolvedConfig,
+    command: "build",
+  };
+
+  // esbuild generates nested directory output with lowest common ancestor base
+  // this is unpredictable and makes it difficult to analyze entry / output
+  // mapping. So what we do here is:
+  // 1. flatten all ids to eliminate slash
+  // 2. in the plugin, read the entry ourselves as virtual files to retain the
+  //    path.
+  const flatIdDeps: Record<string, string> = {};
+  const idToExports: Record<string, ExportsData> = {};
+
+  const optimizeDeps = getDepOptimizationConfig(config, ssr);
+
+  const { plugins: pluginsFromConfig = [], ...esbuildOptions } =
+    optimizeDeps?.esbuildOptions ?? {};
+
+  await Promise.all(
+    Object.keys(depsInfo).map(async (id) => {
+      const src = depsInfo[id].src!;
+      const exportsData = await (depsInfo[id].exportsData ??
+        extractExportsData(src, config, ssr));
+      if (exportsData.jsxLoader && !esbuildOptions.loader?.[".js"]) {
+        // Ensure that optimization won't fail by defaulting '.js' to the JSX parser.
+        // This is useful for packages such as Gatsby.
+        esbuildOptions.loader = {
+          ".js": "jsx",
+          ...esbuildOptions.loader,
+        };
+      }
+      const flatId = flattenId(id);
+      flatIdDeps[flatId] = src;
+      idToExports[id] = exportsData;
+    })
+  );
+
+  if (optimizerContext.cancelled) return { context: undefined, idToExports };
+
+  const define = {
+    "process.env.NODE_ENV": JSON.stringify(process.env.NODE_ENV || config.mode),
+  };
+
+  const platform =
+    ssr && config.ssr?.target !== "webworker" ? "node" : "browser";
+
+  const external = [...(optimizeDeps?.exclude ?? [])];
+
+  const plugins = [...pluginsFromConfig];
+  if (external.length) {
+    plugins.push(esbuildCjsExternalPlugin(external, platform));
+  }
+  plugins.push(esbuildDepPlugin(flatIdDeps, external, config, ssr));
+
+  const context = await esbuild.context({
+    absWorkingDir: process.cwd(),
+    entryPoints: Object.keys(flatIdDeps),
+    bundle: true,
+    // We can't use platform 'neutral', as esbuild has custom handling
+    // when the platform is 'node' or 'browser' that can't be emulated
+    // by using mainFields and conditions
+    platform,
+    define,
+    format: "esm",
+    // See https://github.com/evanw/esbuild/issues/1921#issuecomment-1152991694
+    banner:
+      platform === "node"
+        ? {
+            js: `import { createRequire } from 'module';const require = createRequire(import.meta.url);`,
+          }
+        : undefined,
+    target: ESBUILD_MODULES_TARGET,
+    external,
+    logLevel: "error",
+    splitting: true,
+    sourcemap: true,
+    outdir: processingCacheDir,
+    ignoreAnnotations: true,
+    metafile: true,
+    plugins,
+    charset: "utf8",
+    ...esbuildOptions,
+    supported: {
+      ...defaultEsbuildSupported,
+      ...esbuildOptions.supported,
+    },
+  });
+  return { context, idToExports };
+}
+
+function esbuildOutputFromId(
+  outputs: Record<string, any>,
+  id: string,
+  cacheDirOutputPath: string
+): any {
+  const cwd = process.cwd();
+  const flatId = flattenId(id) + ".js";
+  const normalizedOutputPath = normalizePath(
+    path.relative(cwd, path.join(cacheDirOutputPath, flatId))
+  );
+  const output = outputs[normalizedOutputPath];
+  if (output) {
+    return output;
+  }
+  // If the root dir was symlinked, esbuild could return output keys as `../cwd/`
+  // Normalize keys to support this case too
+  for (const [key, value] of Object.entries(outputs)) {
+    if (normalizePath(path.relative(cwd, key)) === normalizedOutputPath) {
+      return value;
+    }
+  }
+}
+
+function findOptimizedDepInfoInRecord(
+  dependenciesInfo: Record<string, OptimizedDepInfo>,
+  callbackFn: (depInfo: OptimizedDepInfo, id: string) => any
+): OptimizedDepInfo | undefined {
+  for (const o of Object.keys(dependenciesInfo)) {
+    const info = dependenciesInfo[o];
+    if (callbackFn(info, o)) {
+      return info;
+    }
+  }
+}
+
+function needsInterop(
+  config: ResolvedConfig,
+  ssr: boolean,
+  id: string,
+  exportsData: ExportsData,
+  output?: { exports: string[] }
+): boolean {
+  if (getDepOptimizationConfig(config, ssr)?.needsInterop?.includes(id)) {
+    return true;
+  }
+  const { hasModuleSyntax, exports } = exportsData;
+  // entry has no ESM syntax - likely CJS or UMD
+  if (!hasModuleSyntax) {
+    return true;
+  }
+
+  if (output) {
+    // if a peer dependency used require() on an ESM dependency, esbuild turns the
+    // ESM dependency's entry chunk into a single default export... detect
+    // such cases by checking exports mismatch, and force interop.
+    const generatedExports: string[] = output.exports;
+
+    if (
+      !generatedExports ||
+      (isSingleDefaultExport(generatedExports) &&
+        !isSingleDefaultExport(exports))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isSingleDefaultExport(exports: readonly string[]) {
+  return exports.length === 1 && exports[0] === "default";
+}
+
+// We found issues with renaming folders in some systems. This is a custom
+// implementation for the optimizer. It isn't intended to be a general utility
+
+// Based on node-graceful-fs
+
+// The ISC License
+// Copyright (c) 2011-2022 Isaac Z. Schlueter, Ben Noordhuis, and Contributors
+// https://github.com/isaacs/node-graceful-fs/blob/main/LICENSE
+
+// On Windows, A/V software can lock the directory, causing this
+// to fail with an EACCES or EPERM if the directory contains newly
+// created files. The original tried for up to 60 seconds, we only
+// wait for 5 seconds, as a longer time would be seen as an error
+
+const GRACEFUL_RENAME_TIMEOUT = 5000;
+const safeRename = promisify(function gracefulRename(
+  from: string,
+  to: string,
+  cb: (error: NodeJS.ErrnoException | null) => void
+) {
+  const start = Date.now();
+  let backoff = 0;
+  fs.rename(from, to, function CB(er) {
+    if (
+      er &&
+      (er.code === "EACCES" || er.code === "EPERM") &&
+      Date.now() - start < GRACEFUL_RENAME_TIMEOUT
+    ) {
+      setTimeout(function () {
+        fs.stat(to, function (stater, st) {
+          if (stater && stater.code === "ENOENT") fs.rename(from, to, CB);
+          else CB(er);
+        });
+      }, backoff);
+      if (backoff < 100) backoff += 10;
+      return;
+    }
+    if (cb) cb(er);
+  });
+});

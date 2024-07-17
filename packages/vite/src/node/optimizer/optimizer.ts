@@ -1020,10 +1020,6 @@ async function createDepsOptimizer(
     }, timeout);
   }
 
-  // onCrawlEnd is called once when the server starts and all static
-  // imports after the first request have been crawled (dynamic imports may also
-  // be crawled if the browser requests them right away).
-
   /**
    * 这个 onCrawlEnd 函数在 Vite 的开发服务器启动时被调用,
    * 它会在服务器启动并且所有静态导入（static imports）在第一次请求之后都被爬取（crawled）完成时触发
@@ -1079,48 +1075,70 @@ async function createDepsOptimizer(
        *    2) 我们会检查是否有新的依赖项，如果有则重新进行优化运行，如果没有则使用现有的优化结果
        */
 
+      // 提取扫描结果
       const afterScanResult = optimizationResult.result;
-      optimizationResult = undefined; // signal that we'll be using the result
+      // 设置为 undefined 表示我们将使用这个结果
+      optimizationResult = undefined;
 
+      // 等待 afterScanResult 的异步操作完成，获取最终的 result。
       const result = await afterScanResult;
+      // 设为 false，表示当前的处理过程已经结束
       currentlyProcessing = false;
 
+      // 在爬取过程中发现的依赖项
       const crawlDeps = Object.keys(metadata.discovered);
+      // 扫描器扫描出的优化依赖项
       const scanDeps = Object.keys(result.metadata.optimized);
 
       if (scanDeps.length === 0 && crawlDeps.length === 0) {
+        // 如果扫描和爬取过程中都没有发现任何依赖项，输出调试信息表示没有发现依赖项
         debug?.(
           colors.green(
             `✨ no dependencies found by the scanner or crawling static imports`
           )
         );
-        // We still commit the result so the scanner isn't run on the next cold start
-        // for projects without dependencies
+
+        // 即使没有发现任何依赖项，我们仍然会提交结果，以确保在下次冷启动时扫描器不会再次运行。
+        // 这对于没有依赖项的项目尤为重要。(避免在没有依赖项的项目中浪费资源重新运行扫描器)
+
+        // 开始处理下一个发现的批次
         startNextDiscoveredBatch();
+        // 随后运行优化器
         runOptimizer(result);
         return;
       }
 
+      // 检查 needsInterop 不匹配:
       const needsInteropMismatch = findInteropMismatches(
         metadata.discovered,
         result.metadata.optimized
       );
+
+      // 检查扫描器遗漏的依赖:
       const scannerMissedDeps = crawlDeps.some(
+        // 通过检查 crawlDeps（爬取过程中发现的依赖）中是否有不在 scanDeps（扫描器优化的依赖）中的依赖，来判断扫描器是否遗漏了某些依赖
         (dep) => !scanDeps.includes(dep)
       );
+
+      // 判断优化结果是否过时:
       const outdatedResult =
         needsInteropMismatch.length > 0 || scannerMissedDeps;
 
       if (outdatedResult) {
-        // Drop this scan result, and perform a new optimization to avoid a full reload
+        // 表示优化结果过时，需要重新优化以避免完整的页面重载
+        // 取消当前的扫描结果,，并执行新的优化以避免完全重新加载
         result.cancel();
 
-        // Add deps found by the scanner to the discovered deps while crawling
+        // 遍历扫描器发现的所有依赖
         for (const dep of scanDeps) {
+          // 检查扫描器发现的依赖是否在爬取过程中也发现了。如果没有，则说明这是一个新依赖
           if (!crawlDeps.includes(dep)) {
+            // 对于每一个新的依赖，调用 addMissingDep 函数将其添加到缺失的依赖中。
             addMissingDep(dep, result.metadata.optimized[dep].src!);
           }
         }
+
+        // 处理扫描器遗漏的依赖:
         if (scannerMissedDeps) {
           debug?.(
             colors.yellow(
@@ -1129,44 +1147,65 @@ async function createDepsOptimizer(
           );
         }
         debug?.(colors.green(`✨ re-running optimizer`));
+        // 传入0,表示立即重新运行优化器：
         debouncedProcessing(0);
       } else {
+        // 没有过时
+
+        // 这条信息表明，扫描器找到了所有使用的依赖，并将使用扫描后的优化结果
         debug?.(
           colors.green(
             `✨ using post-scan optimizer result, the scanner found every used dependency`
           )
         );
+
+        // 启动处理下一个发现的依赖批处理
         startNextDiscoveredBatch();
+
+        // 运行优化器:
         runOptimizer(result);
       }
     } else if (!holdUntilCrawlEnd) {
+      // 表示在爬取结束之前，优化结果已经发布给浏览器
+
       // The post-scanner optimize result has been released to the browser
       // If new deps have been discovered, issue a regular rerun of the
       // optimizer. A full page reload may still be avoided if the new
       // optimize result is compatible in this case
       if (newDepsDiscovered) {
+        // 如果在爬取静态导入时发现了新的依赖
+
         debug?.(
           colors.green(
             `✨ new dependencies were found while crawling static imports, re-running optimizer`
           )
         );
+        // 设置警告标志，表示有未包含在优化中的依赖
         warnAboutMissedDependencies = true;
+        // 立即重新运行优化器
         debouncedProcessing(0);
       }
     } else {
+      // 表示在爬取结束之前没有发布优化结果
+
+      // 获取爬取过程中发现的所有依赖
       const crawlDeps = Object.keys(metadata.discovered);
+      // 标记当前没有正在处理的任务
       currentlyProcessing = false;
 
       if (crawlDeps.length === 0) {
+        // 如果没有发现任何依赖
         debug?.(
           colors.green(
             `✨ no dependencies found while crawling the static imports`
           )
         );
+        // 标记第一次运行已被调用
         firstRunCalled = true;
       }
 
       // queue the first optimizer run, even without deps so the result is cached
+      // 即使没有发现任何依赖，也将第一次优化器运行排队，以确保结果被缓存。
       debouncedProcessing(0);
     }
   }

@@ -853,6 +853,15 @@ export function isInNodeModules(id: string): boolean {
   return id.includes("node_modules");
 }
 
+export function moduleListContains(
+  moduleList: string[] | undefined,
+  id: string
+): boolean | undefined {
+  return moduleList?.some(
+    (m) => m === id || id.startsWith(withTrailingSlash(m))
+  );
+}
+
 export function isFileReadable(filename: string): boolean {
   if (!tryStatSync(filename)) {
     return false;

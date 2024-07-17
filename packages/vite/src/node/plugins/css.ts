@@ -141,6 +141,7 @@ export interface CSSModulesOptions {
       ) => string);
 }
 
+const cssModuleRE = new RegExp(`\\.module${CSS_LANGS_RE.source}`);
 const directRequestRE = /[?&]direct\b/;
 
 export const isDirectCSSRequest = (request: string): boolean =>
@@ -148,6 +149,9 @@ export const isDirectCSSRequest = (request: string): boolean =>
 
 export const isCSSRequest = (request: string): boolean =>
   CSS_LANGS_RE.test(request);
+
+export const isModuleCSSRequest = (request: string): boolean =>
+  cssModuleRE.test(request);
 
 export async function formatPostcssSourceMap(
   rawMap: ExistingRawSourceMap,

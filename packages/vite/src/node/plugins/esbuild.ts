@@ -27,6 +27,14 @@ const debug = createDebugger("vite:esbuild");
 const validExtensionRE = /\.\w+$/;
 const jsxExtensionsRE = /\.(?:j|t)sx\b/;
 
+// the final build should always support dynamic import and import.meta.
+// if they need to be polyfilled, plugin-legacy should be used.
+// plugin-legacy detects these two features when checking for modern code.
+export const defaultEsbuildSupported = {
+  "dynamic-import": true,
+  "import-meta": true,
+};
+
 let server: ViteDevServer;
 
 export interface ESBuildOptions extends TransformOptions {
