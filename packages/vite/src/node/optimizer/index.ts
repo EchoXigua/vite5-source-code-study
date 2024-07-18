@@ -1599,9 +1599,6 @@ async function prepareEsbuildOptimizerRun(
     //  指定构建入口点，这里是flatIdDeps的键数组
     entryPoints: Object.keys(flatIdDeps),
     bundle: true, //  启用打包
-    // We can't use platform 'neutral', as esbuild has custom handling
-    // when the platform is 'node' or 'browser' that can't be emulated
-    // by using mainFields and conditions
     /**
      * neutral：
      * 在esbuild中，平台设置为neutral表示构建的代码既不专门为浏览器也不专门为Node.js环境设计
@@ -1612,6 +1609,9 @@ async function prepareEsbuildOptimizerRun(
      *
      * browser：
      * 针对浏览器环境的构建，esbuild会处理浏览器特有的语法和特性
+     *
+     * 由于esbuild对node和browser平台有特定的处理方式（如根据mainFields和条件处理模块入口），
+     * 这些处理方式在'neutral'平台中无法模拟
      */
     platform, //设置构建平台，值为"node"或"browser"
     define, //定义全局变量，将process.env.NODE_ENV替换为构建模式
@@ -1646,29 +1646,51 @@ async function prepareEsbuildOptimizerRun(
   return { context, idToExports };
 }
 
+/**
+ * 这个函数的作用是从 esbuild 的输出结果中找到特定 ID 对应的输出文件信息
+ * @param outputs  一个包含 esbuild 输出结果的对象，键是输出文件的路径，值是输出文件的信息
+ * @param id 要查找的依赖项的 ID
+ * @param cacheDirOutputPath 缓存目录的输出路径
+ * @returns
+ */
 function esbuildOutputFromId(
   outputs: Record<string, any>,
   id: string,
   cacheDirOutputPath: string
 ): any {
+  // 获取当前工作目录的路径
   const cwd = process.cwd();
+  // 将 ID 扁平化，去除可能存在的路径分隔符
   const flatId = flattenId(id) + ".js";
+  // 生成标准化的输出路径
   const normalizedOutputPath = normalizePath(
     path.relative(cwd, path.join(cacheDirOutputPath, flatId))
   );
+
+  // 尝试直接从 outputs 中查找标准化后的输出路径对应的输出信息
   const output = outputs[normalizedOutputPath];
   if (output) {
     return output;
   }
-  // If the root dir was symlinked, esbuild could return output keys as `../cwd/`
-  // Normalize keys to support this case too
+
+  // 如果根目录被符号链接了，esbuild 返回的输出键可能包含类似 ../cwd/ 的路径
+  // 规范化键来支持这种情况
+
+  // 遍历 outputs 对象的所有键值对，对每个键进行标准化处理
   for (const [key, value] of Object.entries(outputs)) {
     if (normalizePath(path.relative(cwd, key)) === normalizedOutputPath) {
+      // 如果找到了匹配的路径，返回对应的输出信息
       return value;
     }
   }
 }
 
+/**
+ * 这个函数的作用是在 dependenciesInfo 对象中找到满足 callbackFn 条件的第一个 OptimizedDepInfo 对象
+ * @param dependenciesInfo
+ * @param callbackFn
+ * @returns
+ */
 function findOptimizedDepInfoInRecord(
   dependenciesInfo: Record<string, OptimizedDepInfo>,
   callbackFn: (depInfo: OptimizedDepInfo, id: string) => any
@@ -1681,6 +1703,15 @@ function findOptimizedDepInfoInRecord(
   }
 }
 
+/**
+ * 这个函数用于判断是否需要在构建过程中强制使用 interop，主要用于处理依赖项的优化和模块化问题
+ * @param config
+ * @param ssr
+ * @param id
+ * @param exportsData 依赖项导出的元数据，包括是否具有模块语法 (hasModuleSyntax) 和导出数组 (exports)。
+ * @param output
+ * @returns
+ */
 function needsInterop(
   config: ResolvedConfig,
   ssr: boolean,
@@ -1688,32 +1719,45 @@ function needsInterop(
   exportsData: ExportsData,
   output?: { exports: string[] }
 ): boolean {
+  // 检查配置中是否明确指定了需要 interop 的依赖项
   if (getDepOptimizationConfig(config, ssr)?.needsInterop?.includes(id)) {
     return true;
   }
+
   const { hasModuleSyntax, exports } = exportsData;
-  // entry has no ESM syntax - likely CJS or UMD
+  // 检查依赖项是否使用了非 ES 模块语法 (!hasModuleSyntax),如 CJS,UMD
   if (!hasModuleSyntax) {
     return true;
   }
 
+  // 如果提供了输出信息,则进一步检查
   if (output) {
     // if a peer dependency used require() on an ESM dependency, esbuild turns the
     // ESM dependency's entry chunk into a single default export... detect
     // such cases by checking exports mismatch, and force interop.
+    // 进一步检查生成的导出数组
     const generatedExports: string[] = output.exports;
 
     if (
+      // 导出数组是否存在
       !generatedExports ||
+      // 是否与实际导出数组 (exports) 存在差异
       (isSingleDefaultExport(generatedExports) &&
         !isSingleDefaultExport(exports))
     ) {
       return true;
     }
   }
+
+  // 返回 false，表示不需要强制 interop
   return false;
 }
 
+/**
+ * 检查 exports 数组是否只包含一个元素且该元素为 "default"。
+ * @param exports
+ * @returns
+ */
 function isSingleDefaultExport(exports: readonly string[]) {
   return exports.length === 1 && exports[0] === "default";
 }
