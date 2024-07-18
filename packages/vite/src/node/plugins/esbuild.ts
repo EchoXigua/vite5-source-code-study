@@ -27,9 +27,17 @@ const debug = createDebugger("vite:esbuild");
 const validExtensionRE = /\.\w+$/;
 const jsxExtensionsRE = /\.(?:j|t)sx\b/;
 
-// the final build should always support dynamic import and import.meta.
-// if they need to be polyfilled, plugin-legacy should be used.
-// plugin-legacy detects these two features when checking for modern code.
+/**
+ * 默认支持的特性：
+ * dynamic-import: 该特性允许在代码中使用动态import语法，
+ * 这在现代JavaScript模块中非常常见，尤其是在实现代码拆分和懒加载时。
+ *
+ * import-meta: 该特性允许访问模块的元数据（如当前模块的URL），这在某些高级场景下非常有用。
+ *
+ * 这段代码确保最终的构建总是支持这两个特性
+ * 如果这些特性需要在旧浏览器中被支持，则应该使用plugin-legacy插件进行填充
+ * plugin-legacy插件：这个插件会检测代码中是否使用了这两个特性，并在需要时为旧浏览器添加相应的polyfill
+ */
 export const defaultEsbuildSupported = {
   "dynamic-import": true,
   "import-meta": true,

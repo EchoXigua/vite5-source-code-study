@@ -1403,18 +1403,43 @@ export function depsFromOptimizedDepInfo(
  * the next time the server start we need to use the global
  * browserHash to allow long term caching
  */
+
+/**
+ * 用于将优化器的元数据（metadata）序列化为 JSON 格式，以便存储到缓存中
+ * 它将处理过的元数据转化为 JSON 字符串，同时去除处理中的 Promise 和每个依赖项的 browserHash，以确保缓存的持久性
+ *
+ * @param metadata
+ * @param depsCacheDir 依赖缓存目录的路径
+ * @returns
+ */
 function stringifyDepsOptimizerMetadata(
   metadata: DepOptimizationMetadata,
   depsCacheDir: string
 ) {
+  // 从元数据中提取一些信息
   const { hash, configHash, lockfileHash, browserHash, optimized, chunks } =
     metadata;
+
+  // 序列化处理
   return JSON.stringify(
     {
       hash,
       configHash,
       lockfileHash,
       browserHash,
+      //  将 optimized 对象的每个条目转换为 id 和一个包含 src、file、fileHash 和 needsInterop 的新对象
+      /**
+       * 说一下这个的 map、fromEntries 为什么要这样处理
+       *
+       * 最终想要转化的类型是一个对象，{ id:{src,file,fileHash,needsInterop} }
+       *
+       * 1. 从optimized 中提取所有的value
+       * 2. 遍历这个arr，返回 [ [id,{src,file,fileHash,needsIntero}]... ]
+       * 3. 通过Object.fromEntries 可以将一个键值对数组，转化为一个新的对象
+       * 键值对数组的每个元素（子数组）的第一个元素作为键，第二个元素作为值。
+       *
+       * 这样就得到了想要的结构
+       */
       optimized: Object.fromEntries(
         Object.values(optimized).map(
           ({ id, src, file, fileHash, needsInterop }) => [
@@ -1428,6 +1453,7 @@ function stringifyDepsOptimizerMetadata(
           ]
         )
       ),
+      // 将 chunks 对象的每个条目转换为 id 和一个包含 file 的新对象
       chunks: Object.fromEntries(
         Object.values(chunks).map(({ id, file }) => [id, { file }])
       ),
@@ -1436,14 +1462,29 @@ function stringifyDepsOptimizerMetadata(
       // Paths can be absolute or relative to the deps cache dir where
       // the _metadata.json is located
       if (key === "file" || key === "src") {
+        // 将路径从绝对路径转换为相对于 depsCacheDir 的相对路径，并规范化路径
         return normalizePath(path.relative(depsCacheDir, value));
       }
+      // 其他值保持不变
       return value;
     },
+    // 第三个参数，以便在输出 JSON 时进行格式化，使其更具可读性（即缩进为 2 个空格）
     2
   );
 }
 
+/**
+ * 这个函数是一个用于准备 esbuild 优化器运行的异步函数
+ * 主要作用是配置和启动 esbuild 构建过程，用于预打包依赖项并生成优化的依赖项信息
+ * @param resolvedConfig
+ * @param depsInfo 包含了所有需要优化的依赖项的信息
+ * @param ssr
+ * @param processingCacheDir 用于存储临时处理文件的目录路径
+ * @param optimizerContext 包含了取消标志，用于指示优化过程是否已被取消
+ * @returns
+ *  context  esbuild 的构建上下文，用于管理和控制构建过程
+ *  idToExports 记录了每个依赖项的导出数据
+ */
 async function prepareEsbuildOptimizerRun(
   resolvedConfig: ResolvedConfig,
   depsInfo: Record<string, OptimizedDepInfo>,
@@ -1454,89 +1495,149 @@ async function prepareEsbuildOptimizerRun(
   context?: BuildContext;
   idToExports: Record<string, ExportsData>;
 }> {
+  // 拷贝一份配置，并且设置命令为 build
   const config: ResolvedConfig = {
     ...resolvedConfig,
     command: "build",
   };
 
-  // esbuild generates nested directory output with lowest common ancestor base
-  // this is unpredictable and makes it difficult to analyze entry / output
-  // mapping. So what we do here is:
-  // 1. flatten all ids to eliminate slash
-  // 2. in the plugin, read the entry ourselves as virtual files to retain the
-  //    path.
+  /**
+   * 这段注释解释了 esbuild 生成嵌套目录输出的行为及其处理方式
+   *
+   * 1. 嵌套目录输出：
+   * esbuild在生成输出文件时，会根据输入文件的路径创建嵌套的目录结构
+   * 这种方式的一个问题是，它可能会根据输入文件的共同祖先路径创建目录，从而使得输入/输出映射变得难以预测和分析
+   *
+   * 2. 解决方案：
+   * a. 扁平化所有ID：通过消除路径中的斜杠来扁平化所有ID.
+   *    这意味着将类似a/b/c.js的路径转换成一个扁平化的ID，比如a-b-c.js
+   *    这样可以避免生成嵌套的目录结构，从而简化了输入/输出映射。
+   *
+   * b. 在插件中读取入口文件作为虚拟文件: 在插件中自行读取入口文件，以保留路径信息
+   *    虽然ID被扁平化了，但通过插件读取入口文件可以保留其原始路径信息
+   *    这样做的好处是，在保留路径信息的同时，可以避免嵌套目录输出的问题
+   */
+
+  /**存储扁平化后的依赖ID和其对应的源路径 */
   const flatIdDeps: Record<string, string> = {};
+  /**存储依赖ID和其对应的导出数据 */
   const idToExports: Record<string, ExportsData> = {};
 
+  /** 从config里面 获取依赖优化配置 */
   const optimizeDeps = getDepOptimizationConfig(config, ssr);
 
+  // 从优化配置中结构出 esbuild的插件以及其他 esbuild配置
   const { plugins: pluginsFromConfig = [], ...esbuildOptions } =
     optimizeDeps?.esbuildOptions ?? {};
 
+  // 并行处理每个依赖项
   await Promise.all(
+    // depsInfo：包含所有依赖项的信息
     Object.keys(depsInfo).map(async (id) => {
+      // 对每个依赖项ID进行异步处理
+
+      // 获取依赖项的源路径
       const src = depsInfo[id].src!;
+
+      // 获取或提取依赖项的导出数据
       const exportsData = await (depsInfo[id].exportsData ??
         extractExportsData(src, config, ssr));
+
+      // 检查导出数据中是否包含JSX加载器标记，如果这个标记为true，表示该依赖项包含JSX语法
+      // 检查esbuild选项中是否已经指定了.js文件的加载器
       if (exportsData.jsxLoader && !esbuildOptions.loader?.[".js"]) {
-        // Ensure that optimization won't fail by defaulting '.js' to the JSX parser.
-        // This is useful for packages such as Gatsby.
+        // 将.js文件的加载器设置为jsx，以确保优化过程中不会失败，这对像Gatsby这样的包很有用
+        // 确保了所有.js文件在优化过程中都会使用JSX加载器进行处理，从而避免语法错误。
+
+        // JSX是一种语法扩展，通常用于React项目中，后缀名可以为.js 也可以为.jsx，
+        // 因此需要通过特定的编译器或加载器（如Babel或esbuild的JSX加载器）来处理。
         esbuildOptions.loader = {
           ".js": "jsx",
           ...esbuildOptions.loader,
         };
       }
+
+      // 将依赖ID扁平化，消除路径中的斜杠
       const flatId = flattenId(id);
+      // 存储扁平化后的依赖ID和其源路径的映射关系
       flatIdDeps[flatId] = src;
+      // 存储依赖ID和其导出数据的映射关系
       idToExports[id] = exportsData;
     })
   );
 
+  // 如果被取消，则直接返回，避免不必要的构建工作
   if (optimizerContext.cancelled) return { context: undefined, idToExports };
 
+  // 定义全局变量，用于替换构建过程中process.env.NODE_ENV的值
   const define = {
     "process.env.NODE_ENV": JSON.stringify(process.env.NODE_ENV || config.mode),
   };
 
+  // 设置平台
   const platform =
     ssr && config.ssr?.target !== "webworker" ? "node" : "browser";
 
+  // 获取需要排除的依赖列表，这些依赖不会被打包进最终的构建中
   const external = [...(optimizeDeps?.exclude ?? [])];
 
+  // 将配置中的插件复制到plugins数组中
   const plugins = [...pluginsFromConfig];
+
   if (external.length) {
+    // 如果有需要排除的依赖，添加esbuildCjsExternalPlugin插件
     plugins.push(esbuildCjsExternalPlugin(external, platform));
   }
+
+  // 添加自定义的esbuildDepPlugin插件用于处理依赖优化逻辑
   plugins.push(esbuildDepPlugin(flatIdDeps, external, config, ssr));
 
+  // 调用esbuild.context创建构建上下文
   const context = await esbuild.context({
+    // 设置当前工作目录为进程的当前工作目录
     absWorkingDir: process.cwd(),
+    //  指定构建入口点，这里是flatIdDeps的键数组
     entryPoints: Object.keys(flatIdDeps),
-    bundle: true,
+    bundle: true, //  启用打包
     // We can't use platform 'neutral', as esbuild has custom handling
     // when the platform is 'node' or 'browser' that can't be emulated
     // by using mainFields and conditions
-    platform,
-    define,
-    format: "esm",
+    /**
+     * neutral：
+     * 在esbuild中，平台设置为neutral表示构建的代码既不专门为浏览器也不专门为Node.js环境设计
+     * 这种设置在某些场景下可能很有用，但在这里并不适用
+     *
+     * node：
+     * 针对Node.js环境的构建，esbuild会有一些特定的处理，如支持require等Node.js特有的语法
+     *
+     * browser：
+     * 针对浏览器环境的构建，esbuild会处理浏览器特有的语法和特性
+     */
+    platform, //设置构建平台，值为"node"或"browser"
+    define, //定义全局变量，将process.env.NODE_ENV替换为构建模式
+    format: "esm", //输出格式为"esm"
     // See https://github.com/evanw/esbuild/issues/1921#issuecomment-1152991694
+
+    //  如果平台是node，则添加一个banner，用于支持import语法
     banner:
       platform === "node"
         ? {
             js: `import { createRequire } from 'module';const require = createRequire(import.meta.url);`,
           }
         : undefined,
-    target: ESBUILD_MODULES_TARGET,
-    external,
-    logLevel: "error",
-    splitting: true,
-    sourcemap: true,
-    outdir: processingCacheDir,
-    ignoreAnnotations: true,
-    metafile: true,
-    plugins,
-    charset: "utf8",
-    ...esbuildOptions,
+    target: ESBUILD_MODULES_TARGET, // 设置构建目标环境
+    external, //指定排除的依赖
+    logLevel: "error", //设置日志级别为"error"
+    splitting: true, // 启用代码拆分
+    sourcemap: true, //启用源映射
+    outdir: processingCacheDir, //设置输出目录为processingCacheDir
+    ignoreAnnotations: true, //忽略注解
+    metafile: true, //启用元文件生成
+    plugins, //使用前面定义的插件数组
+    charset: "utf8", //设置字符集为"utf8"
+    ...esbuildOptions, // 合并用户自定义的esbuild选项
+
+    //  合并默认支持的esbuild功能和用户自定义的支持功能
     supported: {
       ...defaultEsbuildSupported,
       ...esbuildOptions.supported,
