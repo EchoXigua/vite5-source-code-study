@@ -57,6 +57,11 @@ const htmlTypesRE = /\.(html|vue|svelte|astro|imba)$/;
 export const importsRE =
   /(?<!\/\/.*)(?<=^|;|\*\/)\s*import(?!\s+type)(?:[\w*{}\n\r\t, ]+from)?\s*("[^"]+"|'[^']+')\s*(?=$|;|\/\/|\/\*)/gm;
 
+/**
+ * 这个函数主要就是用来扫描依赖
+ * @param config
+ * @returns 返回一个对象,其中包含 cancel 和 result 两个属性
+ */
 export function scanImports(config: ResolvedConfig): {
   cancel: () => Promise<void>;
   result: Promise<{
@@ -66,20 +71,29 @@ export function scanImports(config: ResolvedConfig): {
 } {
   // Only used to scan non-ssr code
 
+  // 获取函数开始执行的时间，用于计算执行时间
   const start = performance.now();
+  /**记录依赖的对象 */
   const deps: Record<string, string> = {};
+  /**记录缺失依赖的对象 */
   const missing: Record<string, string> = {};
+  /**存储计算后的入口点 */
   let entries: string[];
 
+  /** 用来跟踪是否取消了扫描操作 */
   const scanContext = { cancelled: false };
 
+  // esbuild 上下文,处理如何计算入口点并准备使用 esbuild 扫描器
   const esbuildContext: Promise<BuildContext | undefined> = computeEntries(
     config
   ).then((computedEntries) => {
     entries = computedEntries;
 
+    // 如果没有找到任何入口点
     if (!entries.length) {
+      // 检查是否配置了 optimizeDeps.entries 或 optimizeDeps.include
       if (!config.optimizeDeps.entries && !config.optimizeDeps.include) {
+        // 发出警告日志，说明未能自动确定入口点
         config.logger.warn(
           colors.yellow(
             "(!) Could not auto-determine entry point from rollupOptions or html files " +
@@ -88,75 +102,101 @@ export function scanImports(config: ResolvedConfig): {
           )
         );
       }
+      // 返回空值，不执行后续操作
       return;
     }
+    // 如果扫描已取消，直接返回
     if (scanContext.cancelled) return;
 
+    // 输出调试信息，显示正在使用的入口点
     debug?.(
       `Crawling dependencies using entries: ${entries
         .map((entry) => `\n  ${colors.dim(entry)}`)
         .join("")}`
     );
+    // 准备使用 esbuild 扫描器，并返回相应的上下文
     return prepareEsbuildScanner(config, entries, deps, missing, scanContext);
   });
 
   const result = esbuildContext
     .then((context) => {
+      /**
+       * 这个函数用来释放 context，防止资源泄漏，同时处理可能发生的错误
+       * @returns
+       */
       function disposeContext() {
         return context?.dispose().catch((e) => {
+          // 处理释放上下文时的错误
           config.logger.error("Failed to dispose esbuild context", {
             error: e,
           });
         });
       }
+
+      // 如果上下文不存在或者扫描已取消，则释放上下文并返回空结果
       if (!context || scanContext?.cancelled) {
         disposeContext();
         return { deps: {}, missing: {} };
       }
+
+      // 重新构建
       return context
         .rebuild()
         .then(() => {
+          // 返回扫描得到的依赖项 deps 和缺失项 missing
           return {
-            // Ensure a fixed order so hashes are stable and improve logs
+            // 确保一个固定的顺序，这样哈希是稳定的，并改善日志
             deps: orderedDependencies(deps),
             missing,
           };
         })
         .finally(() => {
+          // 执行完成后,释放上下文
           return disposeContext();
         });
     })
     .catch(async (e) => {
+      // 处理异常情况
       if (e.errors && e.message.includes("The build was canceled")) {
-        // esbuild logs an error when cancelling, but this is expected so
-        // return an empty result instead
+        // esbuild 在取消时会记录一个错误，但这是预期的，因此返回空结果
         return { deps: {}, missing: {} };
       }
 
+      // 用于指示扫描依赖失败，并列出相关的入口
       const prependMessage = colors.red(`\
   Failed to scan for dependencies from entries:
   ${entries.join("\n")}
 
   `);
+
       if (e.errors) {
+        // 将错误信息格式化为带颜色的消息数组 msgs
         const msgs = await formatMessages(e.errors, {
           kind: "error",
           color: true,
         });
+        // 拼接成完整的错误信息
         e.message = prependMessage + msgs.join("\n");
       } else {
+        // 没有 errors 属性,直接拼接
         e.message = prependMessage + e.message;
       }
       throw e;
     })
     .finally(() => {
+      // 最终清理和日志记录:
+
       if (debug) {
+        // 计算并输出扫描的持续时间
         const duration = (performance.now() - start).toFixed(2);
         const depsStr =
+          // 获取按顺序排列的依赖项 deps
           Object.keys(orderedDependencies(deps))
             .sort()
             .map((id) => `\n  ${colors.cyan(id)} -> ${colors.dim(deps[id])}`)
             .join("") || colors.dim("no dependencies found");
+
+        // 输出扫描完成的日志信息，包括扫描时间和依赖项信息
         debug(`Scan completed in ${duration}ms: ${depsStr}`);
       }
     });
@@ -203,6 +243,15 @@ async function computeEntries(config: ResolvedConfig) {
   return entries;
 }
 
+/**
+ * 这个函数用于准备使用 esbuild 进行扫描的上下文对象
+ * @param config
+ * @param entries 要扫描的入口
+ * @param deps 记录依赖项的对象
+ * @param missing 记录缺失依赖项的对象
+ * @param scanContext 用于跟踪扫描操作是否被取消
+ * @returns
+ */
 async function prepareEsbuildScanner(
   config: ResolvedConfig,
   entries: string[],
@@ -210,12 +259,16 @@ async function prepareEsbuildScanner(
   missing: Record<string, string>,
   scanContext?: { cancelled: boolean }
 ): Promise<BuildContext | undefined> {
+  /**创建一个插件容器 container，用于管理插件和配置 */
   const container = await createPluginContainer(config);
 
+  // 如果扫描取消,则直接返回
   if (scanContext?.cancelled) return;
 
+  // 创建一个 esbuild 插件 plugin，用于实际执行依赖扫描
   const plugin = esbuildScanPlugin(config, container, deps, missing, entries);
 
+  // 从用户配置中获取依赖优化的 esbuild配置插件和 其他配置选项,最终会和默认的合并在一起
   const { plugins = [], ...esbuildOptions } =
     config.optimizeDeps?.esbuildOptions ?? {};
 
@@ -224,36 +277,72 @@ async function prepareEsbuildScanner(
   // Due to syntax incompatibilities between the experimental decorators in TypeScript and TC39 decorators,
   // we cannot simply set `"experimentalDecorators": true` or `false`. (https://github.com/vitejs/vite/pull/15206#discussion_r1417414715)
   // Therefore, we use the closest tsconfig.json from the root to make it work in most cases.
+  /**
+   * 这里解释了为什么在 prepareEsbuildScanner 函数中需要手动加载最接近根目录的 tsconfig.json 文件
+   * 而不依赖 esbuild 自动加载的功能
+   *
+   * 1. 自动加载最近的 tsconfig.json:
+   * esbuild 默认会自动加载最近的 tsconfig.json 文件来配置 TypeScript 的编译选项
+   * 这意味着如果项目中存在多个 tsconfig.json 文件，esbuild 会使用离入口点最近的那个文件
+   *
+   * 2. 问题与限制:
+   *    1）路径解析问题: 当插件解析了路径后，esbuild 无法正确读取 tsconfig.json。这是因为 esbuild 不会考虑插件解析后的路径
+   *    2）TypeScript 中的实验性装饰器语法与 TC39 的装饰器存在语法不兼容的问题
+   *    因此，简单地设置 "experimentalDecorators": true 或 false 并不总是有效的解决方案
+   *
+   * 3. 解决方案:
+   * 为了解决路径解析问题和实验性装饰器的语法兼容性，Vite 在大多数情况下使用距离项目根目录最近的 tsconfig.json
+   * 这样可以确保 esbuild 在大多数情况下都能够正确地配置 TypeScript 编译选项，并且能够处理实验性装饰器的语法问题
+   */
+
   let tsconfigRaw = esbuildOptions.tsconfigRaw;
+  // 如果未提供 tsconfigRaw 或 esbuildOptions.tsconfig
   if (!tsconfigRaw && !esbuildOptions.tsconfig) {
+    // 加载最接近根目录的 tsconfig.json 文件
     const tsconfigResult = await loadTsconfigJsonForFile(
       path.join(config.root, "_dummy.js")
     );
+
+    // 根据其配置设置 tsconfigRaw, experimentalDecorators (实验性装饰器)
     if (tsconfigResult.compilerOptions?.experimentalDecorators) {
       tsconfigRaw = { compilerOptions: { experimentalDecorators: true } };
     }
   }
 
   return await esbuild.context({
+    // 设置为当前工作目录
     absWorkingDir: process.cwd(),
+    // 设置为 false，表示不写入输出文件
     write: false,
+    // 包含了以 entries 为基础的导入语句
     stdin: {
       contents: entries.map((e) => `import ${JSON.stringify(e)}`).join("\n"),
       loader: "js",
     },
-    bundle: true,
+    bundle: true, //表示要打包输出
     format: "esm",
-    logLevel: "silent",
-    plugins: [...plugins, plugin],
-    ...esbuildOptions,
+    logLevel: "silent", // 设置为 "silent"，表示日志级别为静默，不输出日志
+    plugins: [...plugins, plugin], //包括了之前创建的 plugin 和从用户配置中获取的其他插件
+    ...esbuildOptions, // 合并用户的esbuild 配置
     tsconfigRaw,
   });
 }
 
+/**
+ * 这个函数用于对给定的依赖项对象 deps 进行排序，并返回排序后的对象
+ * @param deps
+ * @returns
+ */
 function orderedDependencies(deps: Record<string, string>) {
+  // 将依赖项对象转换为键值对数组
   const depsList = Object.entries(deps);
-  // Ensure the same browserHash for the same set of dependencies
+  // 确保对同一组依赖项使用相同的browserHash
+
+  // 按照键名进行字母顺序排序
+  // localeCompare 方法可以确保按照当前地区的语言顺序进行比较，因此在不同语言环境下都能得到正确的排序结果
   depsList.sort((a, b) => a[0].localeCompare(b[0]));
+
+  // 将排序后的数组转换回对象格式
   return Object.fromEntries(depsList);
 }
 
