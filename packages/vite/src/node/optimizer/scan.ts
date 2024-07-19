@@ -44,6 +44,7 @@ type ResolveIdOptions = Parameters<PluginContainer["resolveId"]>[2];
 
 const debug = createDebugger("vite:deps");
 
+/**匹配 .html、.vue、.svelet、.astro、.imba */
 const htmlTypesRE = /\.(html|vue|svelte|astro|imba)$/;
 
 // A simple regex to detect import sources. This is only used on
@@ -69,7 +70,7 @@ export function scanImports(config: ResolvedConfig): {
     missing: Record<string, string>;
   }>;
 } {
-  // Only used to scan non-ssr code
+  // 仅用于扫描非ssr代码
 
   // 获取函数开始执行的时间，用于计算执行时间
   const start = performance.now();
@@ -210,15 +211,50 @@ export function scanImports(config: ResolvedConfig): {
   };
 }
 
+/**
+ * 这个函数用于根据配置计算项目中的入口文件
+ * 读取 Vite 配置中的 optimizeDeps.entries 和 build.rollupOptions.input 来确定入口文件
+ * @param config
+ * @returns
+ * 
+ * @example
+ * const config = {
+    root: "/project/root",
+    optimizeDeps: {
+      entries: ["src/main.js", "src/app.js"]
+    },
+    build: {
+      rollupOptions: {
+        input: {
+          main: "index.html",
+          admin: "admin.html"
+        }
+      }
+    }
+  };
+
+  最终得到：
+  [
+    "/project/root/src/main.js",
+    "/project/root/src/app.js",
+    "/project/root/index.html",
+    "/project/root/admin.html"
+  ]
+ */
 async function computeEntries(config: ResolvedConfig) {
+  /** 用于存储找到的入口文件路径 */
   let entries: string[] = [];
 
+  // 获取的显式入口文件(用户提供的)
   const explicitEntryPatterns = config.optimizeDeps.entries;
+  //  获取的构建输入配置
   const buildInput = config.build.rollupOptions?.input;
 
   if (explicitEntryPatterns) {
+    // 使用 globEntries 函数根据模式解析入口文件
     entries = await globEntries(explicitEntryPatterns, config);
   } else if (buildInput) {
+    // 根据配置类型（字符串、数组或对象）解析入口文件路径
     const resolvePath = (p: string) => path.resolve(config.root, p);
     if (typeof buildInput === "string") {
       entries = [resolvePath(buildInput)];
@@ -230,13 +266,15 @@ async function computeEntries(config: ResolvedConfig) {
       throw new Error("invalid rollupOptions.input value.");
     }
   } else {
+    // 如果都不存在，则使用 globEntries 函数查找所有 HTML 文件 **/*.html 作为入口文件
     entries = await globEntries("**/*.html", config);
   }
 
-  // Non-supported entry file types and virtual files should not be scanned for
-  // dependencies.
+  // 不支持的条目文件类型和虚拟文件不应该扫描依赖项。
   entries = entries.filter(
     (entry) =>
+      // 使用 isScannable 函数过滤掉不支持扫描的入口文件类型
+      // 使用 fs.existsSync 函数过滤掉不存在的文件路径
       isScannable(entry, config.optimizeDeps.extensions) && fs.existsSync(entry)
   );
 
@@ -376,6 +414,15 @@ const typeRE = /\btype\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s'">]+))/i;
 const langRE = /\blang\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s'">]+))/i;
 const contextRE = /\bcontext\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s'">]+))/i;
 
+/**
+ * 这个函数用于创建一个 esbuild 插件，用于依赖项的扫描和处理
+ * @param config
+ * @param container 插件容器对象，用于管理和执行各种插件功能
+ * @param depImports 记录了依赖项导入路径的对象
+ * @param missing 记录了未能解析的依赖项的对象
+ * @param entries 包含入口文件路径的字符串数组
+ * @returns
+ */
 function esbuildScanPlugin(
   config: ResolvedConfig,
   container: PluginContainer,
@@ -383,17 +430,28 @@ function esbuildScanPlugin(
   missing: Record<string, string>,
   entries: string[]
 ): Plugin {
+  /**用于缓存已解析过的模块路径 */
   const seen = new Map<string, string | undefined>();
 
+  /**
+   * 用于解析给定的模块标识符，在函数内部，通过 container.resolveId 方法尝试解析模块路径
+   *
+   * @param id  要解析的模块标识符
+   * @param importer 导入者的路径，用于确定模块的相对路径
+   * @param options 解析选项，包括扫描 (scan) 选项
+   * @returns
+   */
   const resolve = async (
     id: string,
     importer?: string,
     options?: ResolveIdOptions
   ) => {
     const key = id + (importer && path.dirname(importer));
+    // 如果已经在 seen 中缓存了相同的 key（由 id 和 importer 组成），则直接返回缓存的结果
     if (seen.has(key)) {
       return seen.get(key);
     }
+    // 使用 container.resolveId 方法解析模块路径，并将结果存入 seen 中，以便下次快速访问
     const resolved = await container.resolveId(
       id,
       importer && normalizePath(importer),
@@ -407,33 +465,50 @@ function esbuildScanPlugin(
     return res;
   };
 
+  /**包含需要优化的模块的数组 */
   const include = config.optimizeDeps?.include;
+  /**排除不需要优化的模块的数组 */
   const exclude = [
+    // 通常包括一些用户配置提供的依赖或特定的 Vite 插件
     ...(config.optimizeDeps?.exclude || []),
     "@vite/client",
     "@vite/env",
   ];
 
+  /**判断给定路径是否不是入口文件路径 */
   const isUnlessEntry = (path: string) => !entries.includes(path);
 
+  /**根据 isUnlessEntry 函数的返回值确定某个路径是否应该被标记为外部依赖项 */
   const externalUnlessEntry = ({ path }: { path: string }) => ({
     path,
     external: isUnlessEntry(path),
   });
 
+  /**
+   * 当我们处理包含 glob 导入的内容时，有时候需要确保这些内容能被正确地处理和转义，
+   * 特别是当这些内容不是纯粹的 JavaScript 代码时
+   *
+   * @param contents
+   * @param id
+   * @param loader
+   * @returns
+   */
   const doTransformGlobImport = async (
     contents: string,
     id: string,
     loader: Loader
   ) => {
     let transpiledContents;
-    // transpile because `transformGlobImport` only expects js
+    // transformGlobImport 只接受 JavaScript 代码
     if (loader !== "js") {
+      // 如果不是 'js' 类型，说明内容可能包含其他语言（如 TypeScript、JSX 等）
+      // 需要先通过 transform 函数对内容进行转译成纯 JavaScript
       transpiledContents = (await transform(contents, { loader })).code;
     } else {
       transpiledContents = contents;
     }
 
+    //
     const result = await transformGlobImport(
       transpiledContents,
       id,
@@ -796,10 +871,20 @@ function shouldExternalizeDep(resolvedId: string, rawId: string): boolean {
   return false;
 }
 
+/**
+ * 函数用于判断给定的文件是否可以被扫描。
+ * 它通过检查文件的扩展名以及匹配特定的正则表达式来确定文件是否可扫描
+ * @param id 文件的路径或标识符
+ * @param extensions 可扫描的文件扩展名数组
+ * @returns
+ */
 function isScannable(id: string, extensions: string[] | undefined): boolean {
   return (
+    //  用于匹配 JavaScript 类型文件（例如 .js, .jsx, .ts, .tsx 等）的正则表达式
     JS_TYPES_RE.test(id) ||
+    // 用于匹配 HTML 类型文件（例如 .html, .vue等）的正则表达式
     htmlTypesRE.test(id) ||
+    // 检查文件的扩展名是否在给定的扩展名数组种
     extensions?.includes(path.extname(id)) ||
     false
   );

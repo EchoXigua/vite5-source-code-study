@@ -13,10 +13,10 @@ import colors from "picocolors";
 import type { FSWatcher } from "chokidar";
 import remapping from "@ampproject/remapping";
 import type { DecodedSourceMap, RawSourceMap } from "@ampproject/remapping";
-
+import type MagicString from "magic-string";
 import { createFilter as _createFilter } from "@rollup/pluginutils";
-
 import type { Alias, AliasOptions } from "dep-types/alias";
+import type { TransformResult } from "rollup";
 
 import { cleanUrl, isWindows, slash, withTrailingSlash } from "../shared/utils";
 import {
@@ -417,6 +417,9 @@ export const isExternalUrl = (url: string): boolean => externalRE.test(url);
 
 export const dataUrlRE = /^\s*data:/i;
 export const isDataUrl = (url: string): boolean => dataUrlRE.test(url);
+
+export const virtualModuleRE = /^virtual-module:.*/;
+export const virtualModulePrefix = "virtual-module:";
 
 const _dirname = path.dirname(fileURLToPath(import.meta.url));
 const _require = createRequire(import.meta.url);
@@ -1320,3 +1323,35 @@ const escapeRegexRE = /[-/\\^$*+?.()|[\]{}]/g;
 export function escapeRegex(str: string): string {
   return str.replace(escapeRegexRE, "\\$&");
 }
+
+/**
+ * Transforms transpiled code result where line numbers aren't altered,
+ * so we can skip sourcemap generation during dev
+ */
+export function transformStableResult(
+  s: MagicString,
+  id: string,
+  config: ResolvedConfig
+): TransformResult {
+  return {
+    code: s.toString(),
+    map:
+      config.command === "build" && config.build.sourcemap
+        ? s.generateMap({ hires: "boundary", source: id })
+        : null,
+  };
+}
+
+export function evalValue<T = any>(rawValue: string): T {
+  const fn = new Function(`
+    var console, exports, global, module, process, require
+    return (\n${rawValue}\n)
+  `);
+  return fn();
+}
+
+// Taken from https://stackoverflow.com/a/36328890
+export const multilineCommentsRE = /\/\*[^*]*\*+(?:[^/*][^*]*\*+)*\//g;
+export const singlelineCommentsRE = /\/\/.*/g;
+export const requestQuerySplitRE = /\?(?!.*[/|}])/;
+export const requestQueryMaybeEscapedSplitRE = /\\?\?(?!.*[/|}])/;

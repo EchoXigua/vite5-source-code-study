@@ -53,7 +53,7 @@ export const OPTIMIZABLE_ENTRY_RE = /\.[cm]?[jt]s$/;
 // vite 天生支持导入 import txt from './a.txt?raw' 这种 就是在这里做的处理
 export const SPECIAL_QUERY_RE = /[?&](?:worker|sharedworker|raw|url)\b/;
 
-//js 类型
+/**匹配 js、jsx、ts、tsx、.mjs结尾的 */
 export const JS_TYPES_RE = /\.(?:j|t)sx?$|\.mjs$/;
 
 //css 类型
