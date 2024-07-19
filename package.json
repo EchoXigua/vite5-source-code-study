@@ -13,6 +13,7 @@
     "@types/convert-source-map": "^2.0.3",
     "@types/cross-spawn": "^6.0.6",
     "@types/debug": "^4.1.12",
+    "@types/estree": "^1.0.5",
     "@types/etag": "^1.8.3",
     "@types/micromatch": "^4.0.7",
     "@types/node": "^20.14.2",
