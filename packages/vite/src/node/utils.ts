@@ -412,13 +412,17 @@ export function tryStatSync(file: string): fs.Stats | undefined {
   }
 }
 
+/**匹配外部url （http、https） */
 export const externalRE = /^(https?:)?\/\//;
 export const isExternalUrl = (url: string): boolean => externalRE.test(url);
 
+/**匹配 data url */
 export const dataUrlRE = /^\s*data:/i;
 export const isDataUrl = (url: string): boolean => dataUrlRE.test(url);
 
+/** 匹配虚拟模块 */
 export const virtualModuleRE = /^virtual-module:.*/;
+/**虚拟模块前缀 */
 export const virtualModulePrefix = "virtual-module:";
 
 const _dirname = path.dirname(fileURLToPath(import.meta.url));
