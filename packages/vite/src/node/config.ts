@@ -29,7 +29,7 @@ import {
   normalizeAlias,
   normalizePath,
 } from "./utils";
-// import { getFsUtils } from "./fsUtils";
+import { getFsUtils } from "./fsUtils";
 
 import type { HookHandler, Plugin, PluginWithRequiredHook } from "./plugin";
 

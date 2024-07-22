@@ -905,7 +905,7 @@ export async function _createServer(
     await onHMRUpdate("update", file);
   });
 
-  // getFsUtils(config).initWatcher?.(watcher);
+  getFsUtils(config).initWatcher?.(watcher);
 
   //监听文件的添加
   watcher.on("add", (file) => {

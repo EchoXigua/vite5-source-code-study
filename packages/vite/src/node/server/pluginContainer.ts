@@ -77,9 +77,9 @@ import {
   isObject,
   normalizePath,
   // numberToPos,
-  // prettifyUrl,
+  prettifyUrl,
   rollupVersion,
-  // timeFrom,
+  timeFrom,
 } from "../utils";
 import { FS_PREFIX } from "../constants";
 import type { ResolvedConfig } from "../config";
