@@ -10,6 +10,7 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
+    "@rollup/plugin-typescript": "^11.1.6",
     "@types/convert-source-map": "^2.0.3",
     "@types/cross-spawn": "^6.0.6",
     "@types/debug": "^4.1.12",
@@ -19,6 +20,7 @@
     "@types/node": "^20.14.2",
     "@types/ws": "^8.5.10",
     "rimraf": "^5.0.5",
+    "tslib": "^2.6.2",
     "tsx": "^4.13.0",
     "typescript": "5.2.2"
   }

@@ -1,9 +1,16 @@
 lockfileVersion: '6.0'
 
+settings:
+  autoInstallPeers: false
+  excludeLinksFromLockfile: false
+
 importers:
 
   .:
     devDependencies:
+      '@rollup/plugin-typescript':
+        specifier: ^11.1.6
+        version: 11.1.6(rollup@4.18.0)(tslib@2.6.3)(typescript@5.2.2)
       '@types/convert-source-map':
         specifier: ^2.0.3
         version: 2.0.3
@@ -31,6 +38,9 @@ importers:
       rimraf:
         specifier: ^5.0.5
         version: 5.0.9
+      tslib:
+        specifier: ^2.6.2
+        version: 2.6.3
       tsx:
         specifier: ^4.13.0
         version: 4.16.2
@@ -2130,7 +2140,3 @@ packages:
       utf-8-validate:
         optional: true
     dev: true
-
-settings:
-  autoInstallPeers: false
-  excludeLinksFromLockfile: false
