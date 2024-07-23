@@ -78,13 +78,36 @@ const skipRE = /\.(?:map|json)(?:$|\?)/;
 export const canSkipImportAnalysis = (id: string): boolean =>
   skipRE.test(id) || isDirectCSSRequest(id);
 
+/**
+ * 匹配的是类似 /chunk-ABCDEFGH.js 这样的文件名，这些文件通常是由 Vite 在构建过程中生成的静态依赖项
+ * \/chunk-   匹配字符串 /chunk-，这里的 / 需要转义
+ * [A-Z\d]{8}   匹配8个大写字母或数字。这个部分代表文件名中间的一段随机字符，这通常是为了防止文件名冲突和缓存问题
+ * \.js    匹配文件后缀 .js，这里的 . 需要转义
+ * @example
+ * /chunk-ABCDEFGH.js   /chunk-12345678.js
+ * 这些是静态优化依赖项文件
+ */
 const optimizedDepChunkRE = /\/chunk-[A-Z\d]{8}\.js/;
+
+/**
+ * 匹配的是类似 -ABCDEFGH.js 这样的文件名，这些文件通常是由 Vite 在构建过程中生成的动态依赖项。
+ * -   匹配一个连字符 -
+ * [A-Z\d]{8}    匹配8个大写字母或数字
+ * \.js    匹配文件后缀 .js
+ * @example
+ * -ABCDEFGH.js   -12345678.js
+ * 这些是动态优化依赖项文件
+ */
 const optimizedDepDynamicRE = /-[A-Z\d]{8}\.js/;
 
+/**
+ * 用于匹配代码中的  @vite-ignore `注释`
+ */
 export const hasViteIgnoreRE = /\/\*\s*@vite-ignore\s*\*\//;
 
 const urlIsStringRE = /^(?:'.*'|".*"|`.*`)$/;
 
+/**匹配模板字面量,匹配以反引号（``）包围的字符串 */
 const templateLiteralRE = /^\s*`(.*)`\s*$/;
 
 interface UrlPosition {
@@ -344,6 +367,38 @@ export function importAnalysisPlugin(config: ResolvedConfig): Plugin {
       let isSelfAccepting = false;
       /**是否存在环境变量 */
       let hasEnv = false;
+
+      /**
+       * 自接受：
+       * 自接受模块可以在热更新时处理自己的更新，而不需要其他模块的干预。
+       * 自接受机制允许在代码变更时只更新修改的部分，而不是重新加载整个页面，从而提高开发效率和用户体验。
+       *
+       * 1. 完全自接受
+       * 一个完全自接受的模块在热更新时能够处理所有可能的更新情况，包括：
+       * a) 导出更新：例如，模块导出的函数或对象发生了变化，该模块可以接受这些变化并更新自己
+       * b) 依赖关系更新：例如，该模块的依赖项发生了变化，它能够重新加载和更新这些依赖项
+       * 完全自接受的模块通常在 HMR 中非常独立，能够处理大多数情况而无需外部干预
+       *
+       * 2. 部分自接受
+       * 一个部分自接受的模块在热更新时能够处理一些更新情况，但可能不是所有情况。例如：
+       * a) 仅处理导出更新：如果仅有模块的导出发生变化，而不涉及依赖关系的更新，这类模块可能只处理导出更新
+       * b) 仅处理某些更新：模块可能只能处理特定类型的变化，如 CSS 更改，而不能处理 JavaScript 逻辑的变化
+       * 
+       * 模块的自接受状态对 HMR 的行为有直接影响：
+       * a) 完全自接受的模块可以在更新时独立处理自己的变化，可能会调用更新函数来应用新代码，而不需要重新加载整个页面
+       * b) 部分自接受的模块可能需要其他模块的帮助来处理更新，或者只能处理特定类型的更新
+       * 
+       * 
+       * 在 Vite 或类似的构建工具中，模块可以通过 import.meta.hot.accept() 来声明自己是自接受的
+       * @example
+       * if (import.meta.hot) {
+            import.meta.hot.accept((newModule) => {
+                // 处理模块更新
+                update(newModule);
+            });
+         }
+       */
+
       /**示是否需要注入查询帮助 */
       let needQueryInjectHelper = false;
       let s: MagicString | undefined;
@@ -614,50 +669,79 @@ export function importAnalysisPlugin(config: ResolvedConfig): Plugin {
         imports.length
       );
 
+      /**
+       * 这一块代码主要是在处理导入（import）声明，特别是在构建过程中如何解析和规范化导入路径。
+       * 它的核心目标是确保所有的导入路径都被正确地解析、转换和优化，
+       * 以便 Vite 能够正确地处理模块依赖、支持热模块替换（HMR）以及处理 SSR（服务器端渲染）的要求。
+       */
       await Promise.all(
         imports.map(async (importSpecifier, index) => {
+          // 提取导入路径的相关信息
           const {
-            s: start,
+            s: start, // 导入的开始和结束位置
             e: end,
-            ss: expStart,
+            ss: expStart, // 导入属性的开始和结束位置
             se: expEnd,
-            d: dynamicIndex,
-            a: attributeIndex,
+            d: dynamicIndex, //动态导入的索引
+            a: attributeIndex, //属性索引
           } = importSpecifier;
 
           // #2083 User may use escape path,
           // so use imports[index].n to get the unescaped string
+          // 获取导入路径的原始字符串
           let specifier = importSpecifier.n;
-
+          // 从源代码中提取出这个路径的片段
           const rawUrl = source.slice(start, end);
 
-          // check import.meta usage
+          // 处理 import.meta
           if (rawUrl === "import.meta") {
+            // 进一步检查其属性（如 .hot 和 .env）
+            // .hot：表示热模块替换（HMR）相关的功能，需要进一步分析接受的模块和导出
+            // .env：表示环境变量
+            // 根据不同的属性，设置相应的标志（如 hasHMR 和 hasEnv）
             const prop = source.slice(end, end + 4);
+
             if (prop === ".hot") {
+              // 这段代码的主要目的是处理热模块替换相关的导入情况
+              // 表示当前代码中存在热模块替换相关的 import.meta.hot 使用
               hasHMR = true;
+              // 计算了 .accept 属性的结束位置
+              // 如果在 end + 4 位置处有一个问号 (?)，则 endHot 增加 1 以包含问号。这是为了正确处理 URL 查询字符串中可能的问号
               const endHot = end + 4 + (source[end + 4] === "?" ? 1 : 0);
+
               if (source.slice(endHot, endHot + 7) === ".accept") {
-                // further analyze accepted modules
+                // 分析 .accept 属性
+
                 if (source.slice(endHot, endHot + 14) === ".acceptExports") {
+                  // 表示模块接受了来自其他模块的导出
+
+                  // 记录接受的导出
                   const importAcceptedExports = (orderedAcceptedExports[index] =
                     new Set<string>());
+
+                  // 解析接受的导出并更新 importAcceptedExports
                   lexAcceptedHmrExports(
                     source,
                     source.indexOf("(", endHot + 14) + 1,
                     importAcceptedExports
                   );
+                  // 表示该模块部分自接受
                   isPartiallySelfAccepting = true;
                 } else {
+                  // 不是 .acceptExports
+
+                  // 记录接受的模块 URL
                   const importAcceptedUrls = (orderedAcceptedUrls[index] =
                     new Set<UrlPosition>());
                   if (
+                    // 解析接受的模块 URL 并更新 importAcceptedUrls
                     lexAcceptedHmrDeps(
                       source,
                       source.indexOf("(", endHot + 7) + 1,
                       importAcceptedUrls
                     )
                   ) {
+                    // 表示该模块完全自接受
                     isSelfAccepting = true;
                   }
                 }
@@ -667,44 +751,69 @@ export function importAnalysisPlugin(config: ResolvedConfig): Plugin {
             }
             return;
           } else if (templateLiteralRE.test(rawUrl)) {
+            // 这段代码的目的是在处理模块导入时对模板字面量进行特别处理
+
             // If the import has backticks but isn't transformed as a glob import
             // (as there's nothing to glob), check if it's simply a plain string.
             // If so, we can replace the specifier as a plain string to prevent
             // an incorrect "cannot be analyzed" warning.
+            /**
+             * 1. 处理纯字符串的模板字面量：
+             * 有时候，开发者可能会使用模板字面量来表示固定的路径，但实际上没有动态插值
+             * 这种情况下，代码将这些模板字面量处理为普通字符串，从而简化处理过程
+             *
+             * 2. 防止错误的警告：
+             * 如果不处理这种情况，可能会导致错误的分析警告，特别是在动态导入和路径解析的上下文中
+             * 这段代码通过将模板字面量替换为纯字符串，避免了这些警告，确保路径可以被正确解析
+             *
+             */
+
+            // 检查模板字面量中是否包含 ${}（用于插入表达式的部分）
+            // 如果不包含（即模板字面量中没有插值表达式），那么可以认为它是一个纯字符串
             if (!(rawUrl.includes("${") && rawUrl.includes("}"))) {
+              // 将反引号去除，只保留模板字面量中的字符串内容
               specifier = rawUrl.replace(templateLiteralRE, "$1");
             }
           }
 
+          // 说明该导入语句是动态导入
           const isDynamicImport = dynamicIndex > -1;
 
           // strip import attributes as we can process them ourselves
+          // 处理导入语句中的动态导入和导入属性
+          // 动态导入（例如 import('path')）与静态导入不同，动态导入的路径在运行时才会被确定，因此不需要移除任何属性
+          // 对于静态导入，导入属性（如 import('path', { attributes }) 中的 { attributes }）可能不需要处理，
+          // 因为 Vite 或其他工具会在后续处理中对这些属性进行处理。因此，这部分代码的目的是将这些不需要的导入属性从导入语句中移除，简化处理流程。
           if (!isDynamicImport && attributeIndex > -1) {
+            // 当前导入不是动态导入但存在导入属性
+            // 导入属性 例如 import('path', { attributes })
             str().remove(end + 1, expEnd);
           }
 
-          // static import or valid string in dynamic import
-          // If resolvable, let's resolve it
+          //如果定义了，说明这是一个有效的导入路径
           if (specifier !== undefined) {
-            // skip external / data uri
+            // 跳过外部链接或数据 URL:
             if (isExternalUrl(specifier) || isDataUrl(specifier)) {
               return;
             }
-            // skip ssr external
+            // 跳过 SSR 外部模块:
             if (ssr && !matchAlias(specifier)) {
+              // 在(SSR) 模式下如果模块不是别名匹配且应该外部化，则跳过处理。
               if (shouldExternalizeForSSR(specifier, importer, config)) {
                 return;
               }
+              // 如果是内置模块，也跳过处理
               if (isBuiltin(specifier)) {
                 return;
               }
             }
-            // skip client
+            // 跳过客户端公共路径:
             if (specifier === clientPublicPath) {
               return;
             }
 
             // warn imports to non-asset /public files
+            // 以 / 开头，但不符合assets配置，也不是 URL 正则表达式匹配的 URL，并且是公共文件，则抛出错误
             if (
               specifier[0] === "/" &&
               !(
@@ -724,29 +833,54 @@ export function importAnalysisPlugin(config: ResolvedConfig): Plugin {
               );
             }
 
-            // normalize
+            // 获取规范化后的 URL 和解析 ID
             const [url, resolvedId] = await normalizeUrl(specifier, start);
 
             // record as safe modules
             // safeModulesPath should not include the base prefix.
             // See https://github.com/vitejs/vite/issues/9438#issuecomment-1465270409
+            // 记录安全模块路径，用于后续的模块图分析
             server?.moduleGraph.safeModulesPath.add(
               fsPathFromUrl(stripBase(url, base))
             );
 
+            // 这段代码的主要目的是在处理模块导入时，特别是优化依赖和内置模块的导入时，对导入路径进行必要的重写和处理
             if (url !== specifier) {
+              // 检查 URL 是否变化
+              // 如果 url 与 specifier 不同，意味着需要对 url 进行处理或重写
+
+              /**初始化重写标记 */
               let rewriteDone = false;
               if (
+                // resolvedId 是一个优化的依赖文件
                 depsOptimizer?.isOptimizedDepFile(resolvedId) &&
+                // 不符合内部优化块的正则
                 !optimizedDepChunkRE.test(resolvedId)
               ) {
                 // for optimized cjs deps, support named imports by rewriting named imports to const assignments.
                 // internal optimized chunks don't need es interop and are excluded
+                /**
+                 * 1. 优化后的 CommonJS 依赖项：这些是经过优化的依赖项，通常是从 node_modules 中提取出来并转换为 ES 模块格式
+                 *
+                 * 2. 命名导入重写：由于 CommonJS 模块通常使用 module.exports 和 require 导出和导入，
+                 * 所以需要将这些导入重写为 ES 模块的 const 赋值格式，以便支持命名导入
+                 *
+                 * 3. 内部优化的块：这些是已经经过优化且不需要再处理为 ES 模块的内部块，它们不需要 ES 互操作（ES interop）
+                 */
 
                 // The browserHash in resolvedId could be stale in which case there will be a full
                 // page reload. We could return a 404 in that case but it is safe to return the request
+                /**
+                 * 1. 浏览器哈希（browserHash）：这是一个用来标识文件版本的哈希值，用于缓存控制。如果哈希值过期，可能会导致资源无法正确加载
+                 * 2. 完全页面重新加载：当哈希值过期时，浏览器会重新加载整个页面，以确保加载的是最新版本的资源
+                 * 3. 返回 404 和请求安全性：在哈希值过期时，可以返回一个 404 错误表示资源未找到，
+                 * 但这样做会导致用户体验不佳。直接返回请求是一个更安全的选择，确保资源能够正常加载。
+                 */
+
+                // 去掉 resolvedId 中的 ?v={hash}
                 const file = cleanUrl(resolvedId); // Remove ?v={hash}
 
+                // 检查是否需要处理 CommonJS 模块与 ES 模块的兼容性
                 const needsInterop = await optimizedDepNeedsInterop(
                   depsOptimizer.metadata,
                   file,
@@ -754,10 +888,18 @@ export function importAnalysisPlugin(config: ResolvedConfig): Plugin {
                   ssr
                 );
 
+                // 这段代码处理的是在优化依赖项时，判断是否需要进行 ES 互操作（interop）
                 if (needsInterop === undefined) {
                   // Non-entry dynamic imports from dependencies will reach here as there isn't
                   // optimize info for them, but they don't need es interop. If the request isn't
                   // a dynamic import, then it is an internal Vite error
+                  /**
+                   * 1. needsInterop 未定义：这意味着在依赖项优化信息中，没有找到该文件是否需要 ES 互操作的信息
+                   * 2. 非入口动态导入：这些是依赖项中的动态导入，它们不是模块的入口点，所以没有优化信息
+                   * 3. 优化依赖项的动态正则表达式（optimizedDepDynamicRE）：这是一个正则表达式，
+                   * 用于匹配动态导入的优化依赖项文件名。如果 file 不匹配该正则表达式，则记录一个错误日志，指出优化信息应该被定义
+                   */
+
                   if (!optimizedDepDynamicRE.test(file)) {
                     config.logger.error(
                       colors.red(
@@ -766,7 +908,10 @@ export function importAnalysisPlugin(config: ResolvedConfig): Plugin {
                     );
                   }
                 } else if (needsInterop) {
+                  // 记录一个调试日志，表示 url 需要互操作
                   debug?.(`${url} needs interop`);
+                  // 处理命名导入的互操作
+                  // 这个函数处理命名导入的互操作，将 CommonJS 模块的命名导入转换为适当的 ES 模块导入形式
                   interopNamedImports(
                     str(),
                     importSpecifier,
@@ -775,30 +920,67 @@ export function importAnalysisPlugin(config: ResolvedConfig): Plugin {
                     importer,
                     config
                   );
+                  //   并标记 rewriteDone 为真，说明重写了
                   rewriteDone = true;
                 }
               }
               // If source code imports builtin modules via named imports, the stub proxy export
               // would fail as it's `export default` only. Apply interop for builtin modules to
               // correctly throw the error message.
+
+              /**
+               * 这一段代码主要是处理在源代码中以命名导入（named imports）的方式导入内置模块
+               * 因为这些内置模块通常只通过 export default 进行导出，所以如果以命名导入的方式导入它们，
+               * 将会导致代理导出失败。因此需要应用一些互操作性处理（interop），以正确地抛出错误消息。
+               * @example
+               * import { something } from 'builtin-module';
+               * 这将会失败，因为 'builtin-module' 只导出了 `default`
+               */
               else if (
+                // 导入的 url 包含这个标识符，那么就说明这是一个内置模块
                 url.includes(browserExternalId) &&
+                // source.slice(expStart, start) 用于获取导入语句的具体部分
+                // includes("{") 检查导入语句中是否包含 {，即检查是否是命名导入
+                // 例如，import { something } from 'module' 中包含 {
                 source.slice(expStart, start).includes("{")
               ) {
+                // 处理命名导入的互操作性
                 interopNamedImports(
-                  str(),
-                  importSpecifier,
-                  url,
-                  index,
-                  importer,
-                  config
+                  str(), // 用于代码操作的字符串处理对象
+                  importSpecifier, // 导入的具体规范对象，包含导入的详细信息
+                  url, //导入的 URL
+                  index, // 当前导入语句在源代码中的索引
+                  importer, //导入者文件的路径
+                  config // Vite 的配置对象
                 );
+
+                // 表示互操作性处理已经完成，不需要再进行其他处理
                 rewriteDone = true;
               }
               if (!rewriteDone) {
+                // 在确定不需要互操作性处理（interop）后，重新编写（重写）导入的 URL，以确保它们能够在运行时正确解析和加载
+
+                // 确保 url 在重写时正确地包含在代码中，防止特殊字符导致语法错误
                 const rewrittenUrl = JSON.stringify(url);
+
+                // 计算重写操作的起始位置,如果是动态导入起始位置为 start；否则，为 start - 1
+                // 这是因为静态导入在 start 位置之前有一个引号（" 或 '），需要包括在重写范围内，而动态导入不需要
                 const s = isDynamicImport ? start : start - 1;
+
+                // 计算重写操作的结束位置,如果是动态导入，结束位置为 end；否则，为 end + 1
+                // 同理，静态导入在 end 位置之后有一个引号（" 或 '），需要包括在重写范围内，而动态导入不需要
                 const e = isDynamicImport ? end : end + 1;
+
+                // 将导入语句从位置 s 到位置 e 之间的内容替换为 rewrittenUrl
+                // 选项 { contentOnly: true } 指定只替换内容而不影响其他部分
+
+                /**
+                 * 这里就是真正给裸导入做替换的地方
+                 * @example
+                 * import vue from 'vue' ----- > import vue from 'rewrittenUrl'
+                 *
+                 * import vue from ''/node_moudles/.vite/dep/vue.js
+                 */
                 str().overwrite(s, e, rewrittenUrl, {
                   contentOnly: true,
                 });
@@ -807,39 +989,101 @@ export function importAnalysisPlugin(config: ResolvedConfig): Plugin {
 
             // record for HMR import chain analysis
             // make sure to unwrap and normalize away base
+            /**
+             * 这段代码的主要作用是记录模块导入链以用于热模块替换（HMR）分析，
+             * 并提取导入绑定（imported bindings）以便进行部分接受（partial accept）
+             */
+
+            // stripBase 移除基本路径，unwrapId移除特殊处理的前缀
+            // 目的是标准化 url，确保它不包含任何基础路径信息，从而简化后续处理
             const hmrUrl = unwrapId(stripBase(url, base));
+            // 判断 hmrUrl 是否是本地导入
+            // 如果 hmrUrl 既不是外部 URL 也不是数据 URL，则认为它是本地导入
+            // 本地导入指的是那些在本地文件系统中存在的模块，而非远程或内联的数据
             const isLocalImport = !isExternalUrl(hmrUrl) && !isDataUrl(hmrUrl);
             if (isLocalImport) {
+              // 将 hmrUrl 记录在 orderedImportedUrls 数组的对应索引位置，以便后续 HMR 分析使用
+              // 这有助于跟踪模块的导入链，确保在模块发生变化时能够正确地处理相关的依赖模块
               orderedImportedUrls[index] = hmrUrl;
             }
 
+            // 提取导入绑定
             if (enablePartialAccept && importedBindings) {
+              // 检查是否启用了部分接受功能 且 存在导入绑定信息
+
+              // 提取导入绑定
               extractImportedBindings(
-                resolvedId,
-                source,
-                importSpecifier,
-                importedBindings
+                resolvedId, //解析后的模块 ID
+                source, //模块源代码
+                importSpecifier, //导入说明符（包含导入的详细信息，如起始位置、结束位置等）
+                importedBindings //导入绑定信息
               );
+              /**
+               * 这个步骤的目的是从源代码中提取导入的变量和函数，以便在 HMR 更新时能够有选择性地接受某些更新
+               *
+               * 在 Vite 的热模块替换（HMR）机制中，需要能够跟踪模块的导入链，
+               * 以便在模块更新时能够正确处理相关的依赖模块。这段代码通过记录本地导入的模块 URL 来实现这一点。
+               *
+               * 此外，部分接受功能允许开发者只接受某些特定部分的模块更新，而不是全部重新加载。
+               * 这在大型应用程序中非常有用，可以显著减少重新加载的时间和资源消耗，提高开发体验。
+               * @example
+               * main.js:
+               * import { foo } from './module.js';
+               * console.log(foo);
+               *
+               * module.js:
+               * export const foo = 'bar';
+               *
+               * 如果 module.js 更新了，Vite 需要知道 main.js 导入了 module.js，
+               * 以便在 module.js 发生变化时，能够正确地更新 main.js 中的相关部分，而不是重新加载整个页面
+               *
+               * 通过记录导入链和提取导入绑定，Vite 能够实现更细粒度的模块热替换，提高开发效率和用户体验
+               */
             }
 
+            // 这段代码的主要功能是预转换已知的直接导入请求，以便优化依赖项的处理
             if (
+              // 不是动态导入
               !isDynamicImport &&
+              // 是本地导入
               isLocalImport &&
+              // 检查是否配置了预转换请求
               config.server.preTransformRequests
             ) {
+              // 只有在以上三个条件同时满足时，才会执行预转换请求
+
               // pre-transform known direct imports
               // These requests will also be registered in transformRequest to be awaited
               // by the deps optimizer
+
+              /**
+               * 通过预转换已知的直接导入，可以在依赖项优化器中提前注册这些请求，
+               * 从而在模块发生变化时能够更快地处理这些请求，减少延迟，提高性能。
+               */
+
+              // 去除 hmrUrl 中的导入查询参数
               const url = removeImportQuery(hmrUrl);
+
+              // 预热请求
+              /**
+               * 这种预热机制旨在提前加载和处理一些模块，以减少首次访问时的延迟，提升开发体验和效率。
+               * 当 Vite 预热一个请求时，它会提前加载并处理该模块。这意味着在开发者实际访问该模块之前，
+               * Vite 已经准备好了相关的资源。
+               */
               server.warmupRequest(url, { ssr });
             }
+
+            // 检查 importer 是否在 Vite 的客户端目录之外
           } else if (!importer.startsWith(withTrailingSlash(clientDir))) {
+            // 这段代码在 Vite 中处理动态导入时的逻辑，特别是对无法被 Vite 解析的动态导入进行警告和处理
+
+            //  importer 不在 node_modules 中，会生成警告
             if (!isInNodeModules(importer)) {
-              // check @vite-ignore which suppresses dynamic import warning
               const hasViteIgnore = hasViteIgnoreRE.test(
-                // complete expression inside parens
                 source.slice(dynamicIndex + 1, end)
               );
+
+              // 如果动态导入的表达式中没有使用 /* @vite-ignore */ 注释（用于忽略警告），则生成一个警告
               if (!hasViteIgnore) {
                 this.warn(
                   `\n` +
@@ -860,10 +1104,14 @@ export function importAnalysisPlugin(config: ResolvedConfig): Plugin {
             }
 
             if (!ssr) {
+              // 在非 SSR 环境中，检查 rawUrl 是否符合特定格式
               if (
+                // 如果 URL 不是一个字符串
                 !urlIsStringRE.test(rawUrl) ||
+                // 需要显式导入
                 isExplicitImportRequired(rawUrl.slice(1, -1))
               ) {
+                // 需要注入一个查询帮助函数
                 needQueryInjectHelper = true;
                 str().overwrite(
                   start,

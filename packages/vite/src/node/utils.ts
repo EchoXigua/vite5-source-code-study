@@ -1135,6 +1135,12 @@ export const isJSRequest = (url: string): boolean => {
 const knownTsRE = /\.(?:ts|mts|cts|tsx)(?:$|\?)/;
 export const isTsRequest = (url: string): boolean => knownTsRE.test(url);
 
+/**
+ * 这个函数的作用是从给定的路径中去掉基本路径（base），并返回去掉基本路径后的新路径
+ * @param path
+ * @param base
+ * @returns
+ */
 export function stripBase(path: string, base: string): string {
   if (path === base) {
     return "/";
