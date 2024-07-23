@@ -1802,3 +1802,22 @@ const safeRename = promisify(function gracefulRename(
     if (cb) cb(er);
   });
 });
+
+export async function optimizedDepNeedsInterop(
+  metadata: DepOptimizationMetadata,
+  file: string,
+  config: ResolvedConfig,
+  ssr: boolean
+): Promise<boolean | undefined> {
+  const depInfo = optimizedDepInfoFromFile(metadata, file);
+  if (depInfo?.src && depInfo.needsInterop === undefined) {
+    depInfo.exportsData ??= extractExportsData(depInfo.src, config, ssr);
+    depInfo.needsInterop = needsInterop(
+      config,
+      ssr,
+      depInfo.id,
+      await depInfo.exportsData
+    );
+  }
+  return depInfo?.needsInterop;
+}

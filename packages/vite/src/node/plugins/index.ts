@@ -4,6 +4,7 @@ import type { PluginHookUtils, ResolvedConfig } from "../config";
 import { isDepsOptimizerEnabled } from "../config";
 import { getDepsOptimizer } from "../optimizer";
 import { shouldExternalizeForSSR } from "../ssr/ssrExternal";
+import { importAnalysisPlugin } from "./importAnalysis";
 
 // import { optimizedDepsPlugin } from "./optimizedDeps";
 // import { watchPackageDataPlugin } from '../packages'
@@ -104,7 +105,7 @@ export async function resolvePlugins(
       : [
           // clientInjectionsPlugin(config),
           // cssAnalysisPlugin(config),
-          // importAnalysisPlugin(config),
+          importAnalysisPlugin(config),
         ]),
   ].filter(Boolean) as Plugin[];
 }

@@ -546,24 +546,6 @@ export function removeTimestampQuery(url: string): string {
   return url.replace(timestampRE, "").replace(trailingSeparatorRE, "");
 }
 
-// 用于匹配换行符（包括 Windows 和 Unix 格式的换行符 \r\n 和 \n）
-export const splitRE = /\r?\n/g;
-
-/**
- * 在字符串每一行前面添加一定数量的空格，常用于格式化输出或者生成缩进文本的场景
- *
- * 原生有 padStart，不知道是不是很早之前处理的了
- * @param source 待处理的字符串
- * @param n 要添加的空格数
- * @returns
- */
-export function pad(source: string, n = 2): string {
-  // 将 source 字符串分割成行数组 lines
-  const lines = source.split(splitRE);
-  // 在每行前面添加指定数量的空格
-  return lines.map((l) => ` `.repeat(n) + l).join(`\n`);
-}
-
 export let safeRealpathSync = isWindows
   ? windowsSafeRealPathSync
   : fs.realpathSync.native;
@@ -1359,3 +1341,102 @@ export const multilineCommentsRE = /\/\*[^*]*\*+(?:[^/*][^*]*\*+)*\//g;
 export const singlelineCommentsRE = /\/\/.*/g;
 export const requestQuerySplitRE = /\?(?!.*[/|}])/;
 export const requestQueryMaybeEscapedSplitRE = /\\?\?(?!.*[/|}])/;
+
+// strip UTF-8 BOM
+export function stripBomTag(content: string): string {
+  if (content.charCodeAt(0) === 0xfeff) {
+    return content.slice(1);
+  }
+
+  return content;
+}
+export function isDefined<T>(value: T | undefined | null): value is T {
+  return value != null;
+}
+
+export const urlRE = /(\?|&)url(?:&|$)/;
+
+// 用于匹配换行符（包括 Windows 和 Unix 格式的换行符 \r\n 和 \n）
+export const splitRE = /\r?\n/g;
+
+/**
+ * 在字符串每一行前面添加一定数量的空格，常用于格式化输出或者生成缩进文本的场景
+ *
+ * 原生有 padStart，不知道是不是很早之前处理的了
+ * @param source 待处理的字符串
+ * @param n 要添加的空格数
+ * @returns
+ */
+export function pad(source: string, n = 2): string {
+  // 将 source 字符串分割成行数组 lines
+  const lines = source.split(splitRE);
+  // 在每行前面添加指定数量的空格
+  return lines.map((l) => ` `.repeat(n) + l).join(`\n`);
+}
+
+type Pos = {
+  /** 1-based */
+  line: number;
+  /** 0-based */
+  column: number;
+};
+const range: number = 2;
+
+export function posToNumber(source: string, pos: number | Pos): number {
+  if (typeof pos === "number") return pos;
+  const lines = source.split(splitRE);
+  const { line, column } = pos;
+  let start = 0;
+  for (let i = 0; i < line - 1 && i < lines.length; i++) {
+    start += lines[i].length + 1;
+  }
+  return start + column;
+}
+
+export function generateCodeFrame(
+  source: string,
+  start: number | Pos = 0,
+  end?: number | Pos
+): string {
+  start = Math.max(posToNumber(source, start), 0);
+  end = Math.min(
+    end !== undefined ? posToNumber(source, end) : start,
+    source.length
+  );
+  const lines = source.split(splitRE);
+  let count = 0;
+  const res: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    count += lines[i].length;
+    if (count >= start) {
+      for (let j = i - range; j <= i + range || end > count; j++) {
+        if (j < 0 || j >= lines.length) continue;
+        const line = j + 1;
+        res.push(
+          `${line}${" ".repeat(Math.max(3 - String(line).length, 0))}|  ${
+            lines[j]
+          }`
+        );
+        const lineLength = lines[j].length;
+        if (j === i) {
+          // push underline
+          const pad = Math.max(start - (count - lineLength), 0);
+          const length = Math.max(
+            1,
+            end > count ? lineLength - pad : end - start
+          );
+          res.push(`   |  ` + " ".repeat(pad) + "^".repeat(length));
+        } else if (j > i) {
+          if (end > count) {
+            const length = Math.max(Math.min(end - count, lineLength), 1);
+            res.push(`   |  ` + "^".repeat(length));
+          }
+          count += lineLength + 1;
+        }
+      }
+      break;
+    }
+    count++;
+  }
+  return res.join("\n");
+}

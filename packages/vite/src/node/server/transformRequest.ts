@@ -20,7 +20,10 @@ import {
 } from "../utils";
 import { checkPublicFile } from "../publicDir";
 // import { isDepsOptimizerEnabled } from "../config";
-// import { getDepsOptimizer, initDevSsrDepsOptimizer } from "../optimizer";
+import {
+  getDepsOptimizer,
+  // initDevSsrDepsOptimizer
+} from "../optimizer";
 import { cleanUrl, unwrapId } from "../../shared/utils";
 // import {
 //   applySourcemapIgnoreList,
@@ -242,12 +245,14 @@ async function doTransform(
      *      对于后续的相同模块请求，直接返回已经处理好的结果，节省了重新处理的时间，从而提高了客户端的加载速度和响应性能。
      */
     // 获取依赖优化器实例
-    // const depsOptimizer = getDepsOptimizer(config, ssr);
+    const depsOptimizer = getDepsOptimizer(config, ssr);
     // // 如果依赖优化器存在且当前模块文件未被优化，则注册请求处理
-    // if (!depsOptimizer?.isOptimizedDepFile(id)) {
-    //   // 注册请求处理函数。此函数将确保在模块请求过程中处理模块的转换结果
-    //   server._registerRequestProcessing(id, () => result);
-    // }
+    if (!depsOptimizer?.isOptimizedDepFile(id)) {
+      // 注册请求处理函数。此函数将确保在模块请求过程中处理模块的转换结果
+
+      // 这里的函数很重要，会在扫描完用户代码后在执行一次，这样就会依赖会commit，将临时目录重命名
+      server._registerRequestProcessing(id, () => result);
+    }
   }
 
   return result;
