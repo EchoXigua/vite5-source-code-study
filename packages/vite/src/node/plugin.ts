@@ -10,6 +10,7 @@ import type {
 } from "rollup";
 export type { PluginContext } from "rollup";
 import type { ConfigEnv, ResolvedConfig, UserConfig } from "./config";
+import type { ServerHook } from "./server";
 
 /**
  * Vite 插件扩展了 Rollup 插件接口，添加了一些特定于 Vite 的选项。

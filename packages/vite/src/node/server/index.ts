@@ -204,6 +204,10 @@ export interface FileSystemServeOptions {
 
 export type HttpServer = http.Server | Http2SecureServer;
 
+export type ServerHook = (
+  this: void,
+  server: ViteDevServer
+) => (() => void) | void | Promise<(() => void) | void>;
 export interface ViteDevServer {
   /**
    *  存储了解析后的 Vite 配置对象

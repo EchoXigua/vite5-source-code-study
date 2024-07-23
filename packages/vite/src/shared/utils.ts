@@ -3,6 +3,15 @@ import { NULL_BYTE_PLACEHOLDER, VALID_ID_PREFIX } from "./constants";
 export const isWindows =
   typeof process !== "undefined" && process.platform === "win32";
 
+/**
+ * 这个函数的主要作用是为模块 ID 添加前缀并处理特殊字符，以确保 ID 在模块处理和解析过程中符合规范
+ *
+ * 在构建工具中，虚拟模块通常使用特殊的前缀来进行标识。
+ * 例如，在 Vite 中，虚拟模块（例如由插件生成的模块）通常会被加上特定的前缀，以区别于实际文件系统中的模块
+ * 处理模块 ID 中的特殊字符（如 \0）有助于避免在路径解析和处理过程中出现问题，确保模块 ID 的有效性和一致性
+ * @param id
+ * @returns
+ */
 export function wrapId(id: string): string {
   return id.startsWith(VALID_ID_PREFIX)
     ? id

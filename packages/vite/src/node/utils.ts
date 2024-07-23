@@ -973,14 +973,25 @@ export function unique<T>(arr: T[]): T[] {
   return Array.from(new Set(arr));
 }
 
+/**
+ * 这个函数的作用是将两个 URL 片段合并成一个有效的 URL
+ * @param a
+ * @param b
+ * @returns
+ * @example
+ * /assets/ image.png ---> /assets/image.png
+ */
 export function joinUrlSegments(a: string, b: string): string {
   if (!a || !b) {
+    // 如果有不存在的，则返回那个存在的，都不存在返回空字符串
     return a || b || "";
   }
   if (a[a.length - 1] === "/") {
+    // 移除a末尾的 /
     a = a.substring(0, a.length - 1);
   }
   if (b[0] !== "/") {
+    // 如果b 不是 / 开头则添加 /
     b = "/" + b;
   }
   return a + b;
@@ -1078,17 +1089,31 @@ export function processSrcSetSync(
   );
 }
 
+/**用于匹配 URL 中的所有百分号（%）。它在 injectQuery 函数中用于将百分号替换为 %25，以确保 URL 的一致性 */
 const replacePercentageRE = /%/g;
+/**
+ * 用于将查询参数注入到给定的 URL 中
+ * @param url 要注入查询参数的 URL
+ * @param queryToInject 要注入到 URL 的查询字符串
+ * @returns
+ */
 export function injectQuery(url: string, queryToInject: string): string {
   // encode percents for consistent behavior with pathToFileURL
   // see #2614 for details
+  // 处理 URL 中的百分号
   const resolvedUrl = new URL(
     url.replace(replacePercentageRE, "%25"),
+    // 通过 relative:/// 创建相对 URL
     "relative:///"
   );
+  // 提取查询字符串和哈希
+  // 查询字符串包括 URL 中的所有 ? 后面的部分，哈希是 # 后面的部分
   const { search, hash } = resolvedUrl;
   let pathname = cleanUrl(url);
   pathname = isWindows ? slash(pathname) : pathname;
+  // 构建最终 URL
+  // 如果 URL 已经有查询字符串，则将 queryToInject 与现有的查询字符串通过 & 拼接起来
+  // 最后，将哈希部分（如果有的话）附加到最终的 URL 上
   return `${pathname}?${queryToInject}${search ? `&` + search.slice(1) : ""}${
     hash ?? ""
   }`;
