@@ -1342,8 +1342,8 @@ export function escapeRegex(str: string): string {
 }
 
 /**
- * Transforms transpiled code result where line numbers aren't altered,
- * so we can skip sourcemap generation during dev
+ * 这个函数的作用是处理已经经过变换的代码，并在特定条件下生成源码映射
+ * 在开发环境中跳过源码映射生成以提高性能，而在构建过程中根据配置生成必要的源码映射，便于调试和维护
  */
 export function transformStableResult(
   s: MagicString,
@@ -1351,10 +1351,14 @@ export function transformStableResult(
   config: ResolvedConfig
 ): TransformResult {
   return {
+    // 将 MagicString 实例中的变换结果转换为字符串形式
     code: s.toString(),
     map:
+      // 打包命令且config里面配置了sourcemap 才会生成，否则不生成
       config.command === "build" && config.build.sourcemap
-        ? s.generateMap({ hires: "boundary", source: id })
+        ? // s.generateMap({ hires: "boundary", source: id })：生成高分辨率的源码映射
+          // hires: "boundary" 表示边界高分辨率，source: id 指定映射的源码文件
+          s.generateMap({ hires: "boundary", source: id })
         : null,
   };
 }

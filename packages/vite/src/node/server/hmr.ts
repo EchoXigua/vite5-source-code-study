@@ -2,9 +2,15 @@ import path from "node:path";
 import type { Server } from "node:http";
 import { EventEmitter } from "node:events";
 import type { RollupError } from "rollup";
+import colors from "picocolors";
 
 import type { CustomPayload, HMRPayload, Update } from "types/hmrPayload";
 import { withTrailingSlash, wrapId } from "../../shared/utils";
+import { createDebugger, normalizePath } from "../utils";
+import type { ModuleNode } from "./moduleGraph";
+import type { InferCustomEventPayload, ViteDevServer } from "..";
+
+export const debugHmr = createDebugger("vite:hmr");
 
 const whitespaceRE = /\s/;
 
@@ -325,4 +331,23 @@ function error(pos: number) {
   ) as RollupError;
   err.pos = pos;
   throw err;
+}
+
+export function handlePrunedModules(
+  mods: Set<ModuleNode>,
+  { hot }: ViteDevServer
+): void {
+  // update the disposed modules' hmr timestamp
+  // since if it's re-imported, it should re-apply side effects
+  // and without the timestamp the browser will not re-import it!
+  const t = Date.now();
+  mods.forEach((mod) => {
+    mod.lastHMRTimestamp = t;
+    mod.lastHMRInvalidationReceived = false;
+    debugHmr?.(`[dispose] ${colors.dim(mod.file)}`);
+  });
+  hot.send({
+    type: "prune",
+    paths: [...mods].map((m) => m.url),
+  });
 }

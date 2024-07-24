@@ -24,3 +24,9 @@ export type {
   SSROptions,
   SSRTarget,
 } from "./ssr";
+
+export type {
+  CustomEventMap,
+  InferCustomEventPayload,
+  InvalidatePayload,
+} from "types/customEvent";

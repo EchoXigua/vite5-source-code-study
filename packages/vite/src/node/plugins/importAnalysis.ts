@@ -21,8 +21,8 @@ import {
   SPECIAL_QUERY_RE,
 } from "../constants";
 import {
-  // debugHmr,
-  // handlePrunedModules,
+  debugHmr,
+  handlePrunedModules,
   lexAcceptedHmrDeps,
   lexAcceptedHmrExports,
   normalizeHmrUrl,
@@ -101,8 +101,11 @@ const optimizedDepChunkRE = /\/chunk-[A-Z\d]{8}\.js/;
 const optimizedDepDynamicRE = /-[A-Z\d]{8}\.js/;
 
 /**
- * 用于匹配代码中的  @vite-ignore `注释`
+ * 用于匹配代码中的  @vite-ignore 注释
+ * @example
  */
+//用于匹配代码中的 /* @vite-ignore */ 注释
+//import(/* @vite-ignore */ modulePath); // 忽略警告
 export const hasViteIgnoreRE = /\/\*\s*@vite-ignore\s*\*\//;
 
 const urlIsStringRE = /^(?:'.*'|".*"|`.*`)$/;
@@ -979,7 +982,7 @@ export function importAnalysisPlugin(config: ResolvedConfig): Plugin {
                  * @example
                  * import vue from 'vue' ----- > import vue from 'rewrittenUrl'
                  *
-                 * import vue from ''/node_moudles/.vite/dep/vue.js
+                 * import vue from '/node_modules/.vite/deps/vue.js?v=535dbf73'
                  */
                 str().overwrite(s, e, rewrittenUrl, {
                   contentOnly: true,
@@ -1125,41 +1128,118 @@ export function importAnalysisPlugin(config: ResolvedConfig): Plugin {
         })
       );
 
+      /**
+       * 这段代码处理了几个不同的 URL 集合，并确定了模块的工作模式
+       * 它主要用于处理和分析模块的导入情况，并根据不同的条件进行处理
+       */
+
+      /**过滤出已定义的 URL */
       const _orderedImportedUrls = orderedImportedUrls.filter(isDefined);
+      /**过滤后的url 去重处理 */
       const importedUrls = new Set(_orderedImportedUrls);
       // `importedUrls` will be mixed with watched files for the module graph,
       // `staticImportedUrls` will only contain the static top-level imports and
       // dynamic imports
+      /**
+       * 这段注释解释了 importedUrls 和 staticImportedUrls 的用途和区别
+       *
+       * importedUrls：
+       * 作用：importedUrls 包含了所有导入的 URL。这些 URL 包括了来自模块的静态导入和动态导入
+       * 用途：这些 URL 将会被与模块图中的被监视文件混合。这意味着这些 URL 可能会被进一步处理或跟踪，
+       * 以便在模块图中建立关系，并进行相关的构建和优化操作
+       *
+       * staticImportedUrls：
+       * 作用：staticImportedUrls 仅包含静态的顶层导入和动态导入的 URL。具体来说，这个集合不包括那些可能在其他地方被用作路径的 URL
+       * 用途：这个集合用于处理静态导入和动态导入的情况。例如，在处理动态导入的代码时，可以只关注这些 URL，
+       * 而不必考虑其他可能会被忽略的 URL。这样可以确保仅对相关的导入 URL 进行进一步的操作，比如模块重写、查询注入等。
+       *
+       * 区别：
+       * importedUrls 可能会被用于建立模块图，以确保所有模块和它们的依赖项都被正确跟踪和处理。这通常涉及到分析和优化整个项目中的文件依赖关系。
+       *
+       * staticImportedUrls 可以用于优化和处理静态导入和动态导入，这些通常是编译和构建过程中的重要部分。
+       * 通过专注于这些 URL，工具可以更有效地处理和优化模块依赖，进行静态分析、动态导入重写等操作。
+       */
+
+      /**仅包含静态导入和动态导入的 URL，去除了时间戳查询参数 */
       const staticImportedUrls = new Set(
         _orderedImportedUrls.map((url) => removeTimestampQuery(url))
       );
+
+      /**
+       * 将 orderedAcceptedUrls 和 orderedAcceptedExports 中的被接受的 URL 和导出合并到单个集合中，以便在后续处理过程中使用
+       *
+       * orderedAcceptedUrls:
+       * 这是一个包含被接受的 URL 的数组。在模块热替换过程中，
+       * 当一个模块的某些依赖被接受（即部分自接受或完全自接受）时，这些 URL 会被记录下来
+       *
+       * orderedAcceptedExports:
+       * 这是一个包含被接受的导出的数组。类似于被接受的 URL，这些导出是在模块热替换过程中被记录的
+       */
       const acceptedUrls = mergeAcceptedUrls(orderedAcceptedUrls);
+      /**
+       * 在模块系统中，模块可以有多种导出方式，比如命名导出和默认导出。
+       * 被接受的导出和模块的总导出是针对这些导出的不同处理情况。
+       * @example
+       * 假设有一个模块 module.js，它包含多个导出：
+       * export const foo = 'foo';
+       * export const bar = 'bar';
+       * export default 'defaultExport';
+       *
+       * 在这个模块中，foo 和 bar 是命名导出，defaultExport 是默认导出。这个模块的总导出就是 foo, bar 和 defaultExport。
+       *
+       * 在 HMR 机制中，一个模块可能会部分地接受其导出，即只接受某些特定的导出而不接受全部
+       * 例如，一个模块可能只接受 foo 的更新而不接受 bar 和 defaultExport 的更新
+       *
+       * 假设在 HMR 过程中，module.js 进行了更新，Vite 会检查哪些导出被接受，哪些没有被接受
+       * const acceptedExports = new Set(['foo']); // 被接受的导出
+       * const exports = [{ n: 'foo' }, { n: 'bar' }, { n: 'defaultExport' }]; // 模块的总导出
+       *
+       * 模块的总导出：这是模块中所有导出的集合，包括命名导出和默认导出
+       * 被接受的导出：这是 HMR 过程中实际接受的导出集合。这可能是模块总导出的一个子集
+       */
       const acceptedExports = mergeAcceptedUrls(orderedAcceptedExports);
 
       // While we always expect to work with ESM, a classic worker is the only
       // case where it's not ESM and we need to avoid injecting ESM-specific code
+      /**
+       * 这段注释解释了在某些情况下，特别是处理传统的 Web Worker 时，构建工具需要避免注入 ES 模块（ESM）特有的代码
+       *
+       * ESM：一种现代的 JavaScript 模块系统，支持 import 和 export 语法，广泛应用于前端开发和 Node.js 环境
+       * Classic Worker：传统的 Web Worker，使用 importScripts 进行模块导入，
+       * 而不是使用 ESM 的 import 和 export。它们在一些旧的浏览器或特定的环境中仍然被使用
+       */
+
+      // 确定当前的 importer 是否为经典工作线程。经典工作线程通常指的是使用经典 JavaScript 工作线程 API 的文件，
+      // 它们不支持 ESM（ES 模块）语法，因此需要避免注入 ESM 特定的代码
       const isClassicWorker =
         importer.includes(WORKER_FILE_ID) && importer.includes("type=classic");
 
+      // 检查是否需要注入环境变量，并在特定条件下将这些变量注入到代码中
       if (hasEnv && !isClassicWorker) {
         // inject import.meta.env
+        // 在源代码的开头插入代码
         str().prepend(getEnv(ssr));
       }
 
+      // 这段代码用于在支持热模块替换（HMR）的情况下注入 HMR 上下文到代码中
       if (hasHMR && !ssr && !isClassicWorker) {
-        // debugHmr?.(
-        //   `${
-        //     isSelfAccepting
-        //       ? `[self-accepts]`
-        //       : isPartiallySelfAccepting
-        //       ? `[accepts-exports]`
-        //       : acceptedUrls.size
-        //       ? `[accepts-deps]`
-        //       : `[detected api usage]`
-        //   } ${prettifyUrl(importer, root)}`
-        // );
+        // isClassicWorker为false 表示当前不是经典 Worker（经典 Worker 不支持 HMR）
 
+        debugHmr?.(
+          `${
+            isSelfAccepting
+              ? `[self-accepts]`
+              : isPartiallySelfAccepting
+              ? `[accepts-exports]`
+              : acceptedUrls.size
+              ? `[accepts-deps]`
+              : `[detected api usage]`
+          } ${prettifyUrl(importer, root)}`
+        );
+
+        // 代码将注入 HMR 上下文到源代码中
         // inject hot context
+        // 在源代码的开头插入内容
         str().prepend(
           `import { createHotContext as __vite__createHotContext } from "${clientPublicPath}";` +
             `import.meta.hot = __vite__createHotContext(${JSON.stringify(
@@ -1168,24 +1248,40 @@ export function importAnalysisPlugin(config: ResolvedConfig): Plugin {
         );
       }
 
+      // 这段代码负责根据不同情况注入 injectQuery 函数，该函数用于处理动态导入中的查询参数
       if (needQueryInjectHelper) {
         if (isClassicWorker) {
+          // 在 Vite 中，经典 worker 不使用 ES 模块，因此需要特殊处理
+          // 直接将 __vite__injectQuery 函数的实现代码追加到代码末尾
+          // 这样做是因为经典 worker 不支持 ES 模块导入
           str().append("\n" + __vite__injectQuery.toString());
         } else {
+          // 不是经典 worker，则通过 ES 模块的方式导入 injectQuery 函数
+          //  将导入语句添加到代码的开头
           str().prepend(
             `import { injectQuery as __vite__injectQuery } from "${clientPublicPath}";`
           );
         }
       }
 
-      // normalize and rewrite accepted urls
+      /**
+       * 这段代码的主要作用是标准化并重写接受的 URLs
+       * 这在 HMR 中尤为重要，因为在模块被部分接受（部分自接受）或完全接受（完全自接受）时，
+       * Vite 需要确保这些模块的 URL 是标准化的并且能被正确解析。
+       *
+       */
+      /**用于存储标准化后的 URL，URL唯一 */
       const normalizedAcceptedUrls = new Set<string>();
+      // 遍历 acceptedUrls 数组，对每个 URL 进行标准化处理
       for (const { url, start, end } of acceptedUrls) {
+        // 将url 转为绝对路径，然后进行标准化
         const [normalized] = await moduleGraph.resolveUrl(
           toAbsoluteUrl(url),
           ssr
         );
+        // 添加到集合中
         normalizedAcceptedUrls.add(normalized);
+        // 将源代码中的原始 URL 替换为标准化后的 URL
         str().overwrite(start, end, JSON.stringify(normalized), {
           contentOnly: true,
         });
@@ -1195,46 +1291,105 @@ export function importAnalysisPlugin(config: ResolvedConfig): Plugin {
       // node CSS imports does its own graph update in the css-analysis plugin so we
       // only handle js graph updates here.
       // note that we want to handle .css?raw and .css?url here
+      /**
+       * 更新模块图以进行 HMR 分析
+       * CSS 导入在 css-analysis 插件中自行处理其图更新，所以这里只处理 JavaScript 的图更新。
+       * 需要注意的是，这里也要处理 .css?raw 和 .css?url 类型的导入
+       */
+
+      // 这段代码的主要目的是更新模块的信息，并根据需要处理模块热替换
+
+      // 检查导入的模块是否是 CSS 请求或者是否符合特定的查询条件
       if (!isCSSRequest(importer) || SPECIAL_QUERY_RE.test(importer)) {
         // attached by pluginContainer.addWatchFile
+        /**
+         * 这段注释指出，这部分代码处理的是通过 pluginContainer.addWatchFile 方法附加的导入
+         * _addedImports 集合中包含了插件通过 addWatchFile 方法添加的文件路径
+         *
+         * 在 Vite 插件系统中，插件可以使用 addWatchFile 方法来添加一些文件，这些文件会被 Vite 监视，
+         * 以便在这些文件发生变化时触发热更新或其他处理逻辑。_addedImports 集合正是用来记录这些通过 addWatchFile 方法添加的文件路径
+         *
+         * _addedImports 是用来存储插件通过 addWatchFile 方法新添加的导入路径的集合
+         */
+
+        // 这段代码是处理插件附加的导入。它的目的是将插件附加的导入规范化并添加到 importedUrls 集合中
         const pluginImports = (this as any)._addedImports as
           | Set<string>
           | undefined;
         if (pluginImports) {
           (
             await Promise.all(
+              // 使用扩展运算符 ... 将 Set 转换为数组
+              // 对每个导入路径调用 normalizeUrl 函数进行规范化
               [...pluginImports].map((id) => normalizeUrl(id, 0, true))
             )
-          ).forEach(([url]) => importedUrls.add(url));
+          )
+            // 将规范化后的路径添加到 importedUrls 集合
+            .forEach(([url]) => importedUrls.add(url));
         }
         // HMR transforms are no-ops in SSR, so an `accept` call will
         // never be injected. Avoid updating the `isSelfAccepting`
         // property for our module node in that case.
+        /**
+         * 1. 在 SSR 环境下，HMR 变换是无效操作（no-ops）。也就是说，在 SSR 模式中，HMR 不会对模块进行任何变换
+         * 这是因为 SSR 通常在服务端执行，不需要像客户端那样动态更新模块
+         *
+         * 2. 因此，在 SSR 环境下，accept 调用永远不会被注入到模块中
+         * 在客户端环境中，HMR 可能会注入一个 accept 调用，用于处理模块更新，但在 SSR 中这不会发生
+         *
+         * 3. 因此，在这种情况下，不需要更新我们模块节点的 isSelfAccepting 属性
+         * isSelfAccepting 属性表示模块是否自接受更新。
+         * 在 SSR 环境下，因为不会注入 accept 调用，所以这个属性不需要更新
+         *
+         * 这个注释的目的是提醒开发者，在 SSR 环境下，不需要处理 HMR 相关的逻辑，从而避免不必要的操作
+         */
         if (ssr && importerModule.isSelfAccepting) {
+          // 如果在 SSR 环境中，并且模块是自接受的（即它能够处理自己的热更新），则将 isSelfAccepting 设置为 true
           isSelfAccepting = true;
         }
         // a partially accepted module that accepts all its exports
         // behaves like a self-accepted module in practice
+        /**
+         * 我们再来回顾一下在vite的hmr中，一个模块可以有不同的接受方式
+         * 1. 完全自接受（self-accepting）：模块本身能够处理自身的更新，不需要任何外部干预。
+         * 2. 部分自接受（partially self-accepting）：模块本身无法完全处理自身的更新，
+         * 但它可以处理部分的更新，比如只接受某些导出的部分
+         * 3. 完全不接受（not accepting）：模块无法处理自身的更新，需要重新加载整个模块或整个页面
+         */
+
+        // 处理部分自接受模块
         if (
+          // 当前模块还不是完全自接受的
           !isSelfAccepting &&
+          // 当前模块是部分自接受的
           isPartiallySelfAccepting &&
+          // 被接受的导出数量大于或等于模块的总导出数量;这里不理解其意思可以看 acceptedExports的 注释
           acceptedExports.size >= exports.length &&
+          // 模块的每一个导出都在被接受的导出列表中
           exports.every((e) => acceptedExports.has(e.n))
         ) {
+          // 如果一个部分自接受的模块，实际上接受了它所有的导出（即所有导出都在 acceptedExports 中），
+          // 那么它在行为上就和一个完全自接受的模块没有区别
+          // 因此，可以将这个部分自接受的模块标记为完全自接受
           isSelfAccepting = true;
         }
+
+        // 这一段代码的核心是更新模块图并处理裁剪掉的导入
+        // 模块图是用于跟踪模块之间依赖关系的数据结构
         const prunedImports = await moduleGraph.updateModuleInfo(
-          importerModule,
-          importedUrls,
-          importedBindings,
-          normalizedAcceptedUrls,
-          isPartiallySelfAccepting ? acceptedExports : null,
-          isSelfAccepting,
-          ssr,
-          staticImportedUrls
+          importerModule, // 当前模块，即导入了其他模块的模块
+          importedUrls, // 已导入模块的 URL 集合
+          importedBindings, // 已导入模块的绑定
+          normalizedAcceptedUrls, // 标准化后的被接受的模块 URL 集合
+          isPartiallySelfAccepting ? acceptedExports : null, // 如果是部分自接受模块，则传递被接受的导出
+          isSelfAccepting, // 是否为完全自接受模块
+          ssr, // 是否为服务器端渲染模式
+          staticImportedUrls // 静态导入模块的 URL 集合
         );
+        // 返回的 prunedImports 是当前模块中裁剪掉的导入。这些导入可能由于模块更新或其他原因被移除
         if (hasHMR && prunedImports) {
-          //   handlePrunedModules(prunedImports, server);
+          // 存在裁剪掉的导入，则调用 handlePrunedModules 方法进行处理
+          handlePrunedModules(prunedImports, server);
         }
       }
 
@@ -1248,8 +1403,11 @@ export function importAnalysisPlugin(config: ResolvedConfig): Plugin {
       );
 
       if (s) {
+        // 检查 s 是否被赋值为 MagicString 实例，也就是有没有进行过源代码的转换处理
+        // 需要进一步处理并返回变换后的结果
         return transformStableResult(s, importer, config);
       } else {
+        // 意味着没有源代码进行任何变换，直接返回原始的 source
         return source;
       }
     },

@@ -74,10 +74,12 @@ import { getFsUtils } from "../fsUtils";
 //中间件的处理
 // import { errorMiddleware, prepareError } from "./middlewares/error.ts";
 // import { timeMiddleware } from "./middlewares/time";
-// import {
-//   cachedTransformMiddleware,
-//   transformMiddleware,
-// } from "./middlewares/transform";
+
+// 这里的代码关系到裸导入转换完成后，返回给浏览器
+import {
+  cachedTransformMiddleware,
+  transformMiddleware,
+} from "./middlewares/transform";
 // import { proxyMiddleware } from "./middlewares/proxy";
 // import { baseMiddleware } from "./middlewares/base";
 import {
@@ -995,7 +997,7 @@ export async function _createServer(
   }
 
   //缓存转换中间件，处理缓存的转换，以提高性能
-  // middlewares.use(cachedTransformMiddleware(server));
+  middlewares.use(cachedTransformMiddleware(server));
 
   // 配置代理
   const { proxy } = serverConfig;
@@ -1038,8 +1040,10 @@ export async function _createServer(
     middlewares.use(servePublicMiddleware(server, publicFiles));
   }
 
-  // 主要的文件转换中间件
-  // middlewares.use(transformMiddleware(server));
+  // 主要的文件转换中间件,这个中间件很重要，访问的文件都是通过这个中间件去做转换
+  // 比如 /src/main.ts 中涉及到 import {createApp} from 'vue',就是通过这个中间件
+  // 调用 transform 方法做转换，实际的转换发生再 importAnaysis 这个插件里面做的转换
+  middlewares.use(transformMiddleware(server));
 
   // 提供静态文件服务
   middlewares.use(serveRawFsMiddleware(server));

@@ -25,11 +25,11 @@ import {
   // initDevSsrDepsOptimizer
 } from "../optimizer";
 import { cleanUrl, unwrapId } from "../../shared/utils";
-// import {
-//   applySourcemapIgnoreList,
-//   extractSourcemapFromFile,
-//   injectSourcesContent,
-// } from "./sourcemap";
+import {
+  // applySourcemapIgnoreList,
+  extractSourcemapFromFile,
+  injectSourcesContent,
+} from "./sourcemap";
 // import { isFileServingAllowed } from "./middlewares/static";
 import { throwClosedServerError } from "./pluginContainer";
 
@@ -375,11 +375,11 @@ async function loadAndTransform(
     if (code) {
       try {
         // 从文件中提取源映射信息 source map
-        // const extracted = await extractSourcemapFromFile(code, file);
-        // if (extracted) {
-        //   code = extracted.code;
-        //   map = extracted.map;
-        // }
+        const extracted = await extractSourcemapFromFile(code, file);
+        if (extracted) {
+          code = extracted.code;
+          map = extracted.map;
+        }
       } catch (e) {
         // source map 加载失败
         logger.warn(`Failed to load source map for ${file}.\n${e}`, {
@@ -484,7 +484,7 @@ async function loadAndTransform(
     // 包含映射信息 (mappings)
     if (normalizedMap.mappings) {
       // 注入源内容
-      // await injectSourcesContent(normalizedMap, mod.file, logger);
+      await injectSourcesContent(normalizedMap, mod.file, logger);
     }
 
     // 构建源码映射文件的路径

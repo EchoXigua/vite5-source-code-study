@@ -12,6 +12,9 @@ import { importAnalysisPlugin } from "./importAnalysis";
 import { resolvePlugin } from "./resolve";
 import { getFsUtils } from "../fsUtils";
 
+// 客户端注入变量
+import { clientInjectionsPlugin } from "./clientInjections";
+
 /**
  * 用于根据配置和插件类型（前置插件、普通插件和后置插件）解析和返回一个插件数组
  * @param config
@@ -103,7 +106,7 @@ export async function resolvePlugins(
     ...(isBuild
       ? []
       : [
-          // clientInjectionsPlugin(config),
+          clientInjectionsPlugin(config),
           // cssAnalysisPlugin(config),
           importAnalysisPlugin(config),
         ]),

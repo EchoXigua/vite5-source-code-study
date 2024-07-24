@@ -34,6 +34,10 @@ interface ScriptAssetsUrl {
   url: string;
 }
 
+const htmlProxyRE =
+  /\?html-proxy=?(?:&inline-css)?(?:&style-attr)?&index=(\d+)\.(js|css)$/;
+const isHtmlProxyRE = /\?html-proxy\b/;
+
 const inlineImportRE =
   /(?<!(?<!\.\.)\.)\bimport\s*\(("(?:[^"]|(?<=\\)")*"|'(?:[^']|(?<=\\)')*')\)/dg;
 
@@ -49,6 +53,9 @@ const importMapAppendRE = new RegExp(
   [moduleScriptRE, modulePreloadLinkRE].map((r) => r.source).join("|"),
   "i"
 );
+
+export const isHTMLProxy = (id: string): boolean => isHtmlProxyRE.test(id);
+
 // 用于在 HTML 文件中找到需要处理的资源属性，以便在构建过程中进行资源替换或处理
 export const assetAttrsConfig: Record<string, string[]> = {
   link: ["href"],

@@ -153,6 +153,9 @@ export const isCSSRequest = (request: string): boolean =>
 export const isModuleCSSRequest = (request: string): boolean =>
   cssModuleRE.test(request);
 
+export const isDirectRequest = (request: string): boolean =>
+  directRequestRE.test(request);
+
 export async function formatPostcssSourceMap(
   rawMap: ExistingRawSourceMap,
   file: string

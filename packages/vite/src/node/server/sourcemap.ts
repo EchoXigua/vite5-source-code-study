@@ -1,9 +1,10 @@
 import path from "node:path";
 import fsp from "node:fs/promises";
+import convertSourceMap from "convert-source-map";
 import type { ExistingRawSourceMap, SourceMap } from "rollup";
 import type { Logger } from "../logger";
 import { cleanUrl } from "../../shared/utils";
-import { createDebugger } from "../utils";
+import { createDebugger, blankReplacer } from "../utils";
 
 const debug = createDebugger("vite:sourcemap", {
   onlyWhenFocused: true,
@@ -105,4 +106,71 @@ export function genSourceMapUrl(map: SourceMap | string): string {
     map = JSON.stringify(map);
   }
   return `data:application/json;base64,${Buffer.from(map).toString("base64")}`;
+}
+
+export async function extractSourcemapFromFile(
+  code: string,
+  filePath: string
+): Promise<{ code: string; map: SourceMap } | undefined> {
+  const map = (
+    convertSourceMap.fromSource(code) ||
+    (await convertSourceMap.fromMapFileSource(
+      code,
+      createConvertSourceMapReadMap(filePath)
+    ))
+  )?.toObject();
+
+  if (map) {
+    return {
+      code: code.replace(convertSourceMap.mapFileCommentRegex, blankReplacer),
+      map,
+    };
+  }
+}
+
+function createConvertSourceMapReadMap(originalFileName: string) {
+  return (filename: string) => {
+    return fsp.readFile(
+      path.resolve(path.dirname(originalFileName), filename),
+      "utf-8"
+    );
+  };
+}
+
+export function applySourcemapIgnoreList(
+  map: ExistingRawSourceMap,
+  sourcemapPath: string,
+  sourcemapIgnoreList: (sourcePath: string, sourcemapPath: string) => boolean,
+  logger?: Logger
+): void {
+  let { x_google_ignoreList } = map;
+  if (x_google_ignoreList === undefined) {
+    x_google_ignoreList = [];
+  }
+  for (
+    let sourcesIndex = 0;
+    sourcesIndex < map.sources.length;
+    ++sourcesIndex
+  ) {
+    const sourcePath = map.sources[sourcesIndex];
+    if (!sourcePath) continue;
+
+    const ignoreList = sourcemapIgnoreList(
+      path.isAbsolute(sourcePath)
+        ? sourcePath
+        : path.resolve(path.dirname(sourcemapPath), sourcePath),
+      sourcemapPath
+    );
+    if (logger && typeof ignoreList !== "boolean") {
+      logger.warn("sourcemapIgnoreList function must return a boolean.");
+    }
+
+    if (ignoreList && !x_google_ignoreList.includes(sourcesIndex)) {
+      x_google_ignoreList.push(sourcesIndex);
+    }
+  }
+
+  if (x_google_ignoreList.length > 0) {
+    if (!map.x_google_ignoreList) map.x_google_ignoreList = x_google_ignoreList;
+  }
 }

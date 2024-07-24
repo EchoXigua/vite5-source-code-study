@@ -1,5 +1,8 @@
+export const ERR_OPTIMIZE_DEPS_PROCESSING_ERROR =
+  "ERR_OPTIMIZE_DEPS_PROCESSING_ERROR";
 export const ERR_OUTDATED_OPTIMIZED_DEP = "ERR_OUTDATED_OPTIMIZED_DEP";
-
+export const ERR_FILE_NOT_FOUND_IN_OPTIMIZED_DEP_DIR =
+  "ERR_FILE_NOT_FOUND_IN_OPTIMIZED_DEP_DIR";
 export function throwOutdatedRequest(id: string): never {
   const err: any = new Error(
     `There is a new version of the pre-bundle for "${id}", ` +
