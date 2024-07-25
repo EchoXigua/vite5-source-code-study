@@ -35,7 +35,7 @@ const importMetaUrl = new URL(import.meta.url);
  * 以下代码展示了如何使用注入的全局常量和 import.meta.url 处理热模块替换（HMR）的相关配置
  */
 
-//服务器主机名，直接从注入的全局常量 __SERVER_HOST__ 获取。
+//服务器主机名，直接从注入的全局常量获取。
 const serverHost = __SERVER_HOST__;
 //优先使用注入的协议，没有的话根据当前模块的URL 协议来推断，https使用 wss，否则使用 ws
 const socketProtocol =

@@ -216,6 +216,9 @@ export function serveStaticMiddleware(
  * 这在某些情况下很有用，比如在链接的 monorepo 项目中，需要访问根目录之外的文件
  * @param server
  * @returns
+ * @example
+ * import /@fs/..../package/vite/dist/client/env.mjs
+ * 这种导入请求就是在这里做的处理
  */
 export function serveRawFsMiddleware(
   server: ViteDevServer
