@@ -613,3 +613,328 @@ const server = await createServer({
 
 
 
+这个函数用于启动 Vite 开发服务器，接收一个 ViteDevServer 实例和一个可选的端口号 inlinePort，并在特定条件下启动 HTTP 服务器
+
+```typescript
+async function startServer(
+  server: ViteDevServer,
+  inlinePort?: number
+): Promise<void> {
+  const httpServer = server.httpServer;
+  if (!httpServer) {
+    //不能在中间件模式下调用 server.listen。
+    throw new Error("Cannot call server.listen in middleware mode.");
+  }
+
+  //获取服务器配置选项。
+  const options = server.config.server;
+  //解析主机名
+  const hostname = await resolveHostname(options.host);
+  //确定端口，优先使用 inlinePort，否则使用配置中的端口
+  const configPort = inlinePort ?? options.port;
+
+  /**
+   * 1. 非严格端口模式：在开发服务器的配置中，可以选择是否启用严格端口模式。
+   *    非严格端口模式下，开发服务器可以使用操作系统提供的可用端口，而不仅限于配置中指定的端口。
+   * 2. 端口可能不一致：在重新启动服务器时，如果之前使用的端口仍然可用，开发服务器可能会选择重新使用该端口。
+   *    这种情况下，服务器当前运行的端口可能会与配置中指定的端口不同。
+   * 3. 避免浏览器标签页切换：为了避免正在运行的浏览器标签页因为端口变化而刷新或重新加载，
+   *    开发服务器会尽量保持之前使用的端口不变，除非配置中显式地更改了端口设置。
+   *
+   * 这样的设计能够确保开发过程中，开发服务器的端口变化对开发者在浏览器中打开的标签页造成的干扰最小化，
+   * 提升开发体验的连续性和稳定性
+   */
+
+  //如果配置的端口为空或者等于服务器配置的端口，使用当前服务器端口
+  //否则使用 configPort，如果都没有，则使用默认端口 DEFAULT_DEV_PORT
+  const port =
+    (!configPort || configPort === server._configServerPort
+      ? server._currentServerPort
+      : configPort) ?? DEFAULT_DEV_PORT;
+
+  // 更新服务器的配置端口
+  server._configServerPort = configPort;
+
+  // 启动 HTTP 服务器
+  const serverPort = await httpServerStart(httpServer, {
+    port,
+    strictPort: options.strictPort,
+    host: hostname.host,
+    logger: server.config.logger,
+  });
+  // 更新服务器当前端口
+  server._currentServerPort = serverPort;
+}
+```
+
+
+
+startServer 里面实际调用了 httpServerStart 这个方法来去启动服务器（listen）
+
+```typescript
+export async function httpServerStart(
+  httpServer: HttpServer,
+  serverOptions: {
+    port: number;
+    strictPort: boolean | undefined;
+    host: string | undefined;
+    logger: Logger;
+  }
+): Promise<number> {
+  let { port, strictPort, host, logger } = serverOptions;
+
+  return new Promise((resolve, reject) => {
+    const onError = (e: Error & { code?: string }) => {
+      if (e.code === "EADDRINUSE") {
+        if (strictPort) {
+          httpServer.removeListener("error", onError);
+          reject(new Error(`Port ${port} is already in use`));
+        } else {
+          logger.info(`Port ${port} is in use, trying another one...`);
+          httpServer.listen(++port, host);
+        }
+      } else {
+        httpServer.removeListener("error", onError);
+        reject(e);
+      }
+    };
+
+    httpServer.on("error", onError);
+
+    httpServer.listen(port, host, () => {
+      httpServer.removeListener("error", onError);
+      resolve(port);
+    });
+  });
+}
+```
+
+
+
+这里的重点就是 httpServer.listen ，还记得吗，在创建server 的时候，这里已经把listen 方法重写了，来让我们回顾一下：
+
+1. 先保存一份原始的listen 方法
+2. 重写listen方法，在执行原始的listen 方法之间做一些初始化的事情，例如：
+
+1. 1. 启动热更新服务
+   2. 调用initServer 这个方法里面最重要的就是预构建依赖，其次是对一些文件预热
+
+```typescript
+  if (!middlewareMode && httpServer) {
+    // 确保不是中间件模式且存在 httpServer 实例。
+    // 将原始的 httpServer.listen 方法绑定到 listen 变量上，以便稍后调用。
+    const listen = httpServer.listen.bind(httpServer);
+
+    // 覆盖 httpServer.listen 方法，在实际调用原始 listen 方法之前，先执行一些初始化操作。
+    httpServer.listen = (async (port: number, ...args: any[]) => {
+      try {
+        //确保 WebSocket 服务器启动
+        hot.listen();
+        //initServer 确保某些组件或优化器在服务器启动前已经初始化
+        await initServer();
+      } catch (e) {
+        //捕获错误并发出 error 事件
+        httpServer.emit("error", e);
+        return;
+      }
+      //调用原始的 listen 方法：
+      return listen(port, ...args);
+    }) as any;
+  } else {
+    //处理中间件模式或没有 httpServer 的清空
+    if (options.hotListen) {
+      //options.hotListen 为 true，则启动 WebSocket 服务器
+      hot.listen();
+    }
+    //调用 initServer 进行初始化
+    await initServer();
+  }
+```
+
+
+
+我们再来看看 initServer，这个函数主要用于初始化服务器。
+
+目的是为了确保在服务器启动时，一些关键的初始化步骤只执行一次，即使 httpServer.listen 被多次调用。
+
+这是为了避免重复执行 buildStart 以及其他初始化逻辑
+
+```typescript
+ const initServer = async () => {
+    //检查服务器是否已经初始化
+    if (serverInited) return;
+    //检查是否有正在进行的初始化过程
+    if (initingServer) return initingServer;
+
+    //开始初始化过程
+    initingServer = (async function () {
+      // 调用 buildStart 钩子函数，开始构建过程
+      await container.buildStart({});
+      // 在所有容器插件准备好后启动深度优化器
+      if (isDepsOptimizerEnabled(config, false)) {
+        //如果启用了依赖优化器，则初始化依赖优化器
+        /** 这里开始的依赖预构建 */
+        await initDepsOptimizer(config, server);
+      }
+
+      //调用 warmupFiles 函数，对一些文件进行预热，以提高性能
+      warmupFiles(server);
+
+      //初始化完成后，重置 initingServer 以允许将来的重新初始化
+      initingServer = undefined;
+      //设置 serverInited 为 true，表示服务器已经初始化完成
+      serverInited = true;
+    })();
+    return initingServer;
+  };
+```
+
+
+
+> 这里提一下 buildStart 这里通过插件容器去调用 插件的buildStart钩子函数，一些插件需要在此做一些初始化的事情
+
+这里是pluginContainer 自身的buildStart，会并行执行所有插件的 buildStart 钩子
+
+```typescript
+ async buildStart() {
+    await handleHookPromise(
+      hookParallel(
+        "buildStart",
+        (plugin) => new Context(plugin),
+        () => [container.options as NormalizedInputOptions]
+      )
+    );
+  },
+```
+
+下面是客户端注入常量的插件，在buildStart 钩子做了一些初始化，在transform 钩子的时候去替换源码中定义的常量，将其转换为真实的常量。源码位置vite/src/node/plugins/clientInjections.ts
+
+```typescript
+export function clientInjectionsPlugin(config: ResolvedConfig): Plugin {
+  let injectConfigValues: (code: string) => string
+
+  return {
+    name: 'vite:client-inject',
+    async buildStart() {
+      const resolvedServerHostname = (await resolveHostname(config.server.host))
+        .name
+      const resolvedServerPort = config.server.port!
+      const devBase = config.base
+
+      const serverHost = `${resolvedServerHostname}:${resolvedServerPort}${devBase}`
+
+      let hmrConfig = config.server.hmr
+      hmrConfig = isObject(hmrConfig) ? hmrConfig : undefined
+      const host = hmrConfig?.host || null
+      const protocol = hmrConfig?.protocol || null
+      const timeout = hmrConfig?.timeout || 30000
+      const overlay = hmrConfig?.overlay !== false
+      const isHmrServerSpecified = !!hmrConfig?.server
+      const hmrConfigName = path.basename(config.configFile || 'vite.config.js')
+
+      // hmr.clientPort -> hmr.port
+      // -> (24678 if middleware mode and HMR server is not specified) -> new URL(import.meta.url).port
+      let port = hmrConfig?.clientPort || hmrConfig?.port || null
+      if (config.server.middlewareMode && !isHmrServerSpecified) {
+        port ||= 24678
+      }
+
+      let directTarget = hmrConfig?.host || resolvedServerHostname
+      directTarget += `:${hmrConfig?.port || resolvedServerPort}`
+      directTarget += devBase
+
+      let hmrBase = devBase
+      if (hmrConfig?.path) {
+        hmrBase = path.posix.join(hmrBase, hmrConfig.path)
+      }
+
+      const userDefine: Record<string, any> = {}
+      for (const key in config.define) {
+        // import.meta.env.* is handled in `importAnalysis` plugin
+        if (!key.startsWith('import.meta.env.')) {
+          userDefine[key] = config.define[key]
+        }
+      }
+      const serializedDefines = serializeDefine(userDefine)
+
+      const modeReplacement = escapeReplacement(config.mode)
+      const baseReplacement = escapeReplacement(devBase)
+      const definesReplacement = () => serializedDefines
+      const serverHostReplacement = escapeReplacement(serverHost)
+      const hmrProtocolReplacement = escapeReplacement(protocol)
+      const hmrHostnameReplacement = escapeReplacement(host)
+      const hmrPortReplacement = escapeReplacement(port)
+      const hmrDirectTargetReplacement = escapeReplacement(directTarget)
+      const hmrBaseReplacement = escapeReplacement(hmrBase)
+      const hmrTimeoutReplacement = escapeReplacement(timeout)
+      const hmrEnableOverlayReplacement = escapeReplacement(overlay)
+      const hmrConfigNameReplacement = escapeReplacement(hmrConfigName)
+
+      injectConfigValues = (code: string) => {
+        return code
+          .replace(`__MODE__`, modeReplacement)
+          .replace(/__BASE__/g, baseReplacement)
+          .replace(`__DEFINES__`, definesReplacement)
+          .replace(`__SERVER_HOST__`, serverHostReplacement)
+          .replace(`__HMR_PROTOCOL__`, hmrProtocolReplacement)
+          .replace(`__HMR_HOSTNAME__`, hmrHostnameReplacement)
+          .replace(`__HMR_PORT__`, hmrPortReplacement)
+          .replace(`__HMR_DIRECT_TARGET__`, hmrDirectTargetReplacement)
+          .replace(`__HMR_BASE__`, hmrBaseReplacement)
+          .replace(`__HMR_TIMEOUT__`, hmrTimeoutReplacement)
+          .replace(`__HMR_ENABLE_OVERLAY__`, hmrEnableOverlayReplacement)
+          .replace(`__HMR_CONFIG_NAME__`, hmrConfigNameReplacement)
+      }
+    },
+    async transform(code, id, options) {
+      if (id === normalizedClientEntry || id === normalizedEnvEntry) {
+        return injectConfigValues(code)
+      } else if (!options?.ssr && code.includes('process.env.NODE_ENV')) {
+        // replace process.env.NODE_ENV instead of defining a global
+        // for it to avoid shimming a `process` object during dev,
+        // avoiding inconsistencies between dev and build
+        const nodeEnv =
+          config.define?.['process.env.NODE_ENV'] ||
+          JSON.stringify(process.env.NODE_ENV || config.mode)
+        return await replaceDefine(
+          code,
+          id,
+          {
+            'process.env.NODE_ENV': nodeEnv,
+            'global.process.env.NODE_ENV': nodeEnv,
+            'globalThis.process.env.NODE_ENV': nodeEnv,
+          },
+          config,
+        )
+      }
+    },
+  }
+}
+```
+
+
+
+让我们在回到主线流程上面来
+
+```typescript
+ async listen(port?: number, isRestart?: boolean) {
+    await startServer(server, port)
+    if (httpServer) {
+      server.resolvedUrls = await resolveServerUrls(
+        httpServer,
+        config.server,
+        config,
+      )
+      if (!isRestart && config.server.open) server.openBrowser()
+    }
+    return server
+  },
+```
+
+启动完服务器后，会去调用openBrowser 打开浏览器，这里对windows 和 mac 系统做了不同的处理，windows 通过调用 open 这个包去打开浏览器，而mac 电脑 则通过node子进程 去执行一些命令来打开浏览器。源码位置vite/src/node/server/openBrowser.ts
+
+
+
+
+
+至此，执行完 npm run dev 启动vite 服务器的大致流程就算完了，但是要想真正的能够正常的打开浏览器显示里面的内容 还需要很多工作的处理，预构建依赖会单独出一章讲解
