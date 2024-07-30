@@ -25,7 +25,7 @@ import {
   createHMRBroadcaster,
   createServerHMRChannel,
   getShortName,
-  // handleHMRUpdate,
+  handleHMRUpdate,
   // updateModules,
 } from "./hmr";
 import type { HMRBroadcaster, HmrOptions } from "./hmr";
@@ -72,7 +72,7 @@ import type { BindCLIShortcutsOptions } from "../shortcuts";
 import { getFsUtils } from "../fsUtils";
 
 //中间件的处理
-// import { errorMiddleware, prepareError } from "./middlewares/error.ts";
+import { errorMiddleware, prepareError } from "./middlewares/error";
 // import { timeMiddleware } from "./middlewares/time";
 
 // 这里的代码关系到裸导入转换完成后，返回给浏览器
@@ -846,12 +846,12 @@ export async function _createServer(
       //只有当 serverConfig.hmr 不等于 false 时才会继续执行后续操作。
       try {
         //处理具体的 HMR 更新操作
-        // await handleHMRUpdate(type, file, server);
+        await handleHMRUpdate(type, file, server);
       } catch (err) {
         //发送错误热更新广播器
         hot.send({
           type: "error",
-          // err: prepareError(err),
+          err: prepareError(err),
         });
       }
     }
@@ -1071,7 +1071,7 @@ export async function _createServer(
   }
 
   // 处理服务器中的一般错误，该中间件可以在请求处理过程中捕获到的任何错误，并进行适当的处理和记录
-  // middlewares.use(errorMiddleware(server, !!middlewareMode));
+  middlewares.use(errorMiddleware(server, !!middlewareMode));
 
   // httpServer.listen can be called multiple times
   // when port when using next port number

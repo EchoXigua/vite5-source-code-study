@@ -186,6 +186,9 @@ importers:
       sirv:
         specifier: ^2.0.4
         version: 2.0.4
+      strip-ansi:
+        specifier: ^7.1.0
+        version: 7.1.0
       strip-literal:
         specifier: ^2.1.0
         version: 2.1.0
