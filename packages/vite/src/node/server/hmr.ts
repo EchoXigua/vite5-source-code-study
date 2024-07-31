@@ -251,6 +251,16 @@ export async function handleHMRUpdate(
 
 type HasDeadEnd = boolean;
 
+/**
+ * 用于处理在 Vite 开发服务器中，当文件发生变化时的模块热更新
+ * 它根据变化的文件及其相关模块，决定是进行局部模块更新还是全局页面重载，从而实现高效的开发体验
+ * @param file 变化的文件路径
+ * @param modules 受影响的模块列表
+ * @param timestamp 当前时间戳
+ * @param param3
+ * @param afterInvalidation 表示是否在失效后执行
+ * @returns
+ */
 export function updateModules(
   file: string,
   modules: ModuleNode[],
@@ -258,73 +268,127 @@ export function updateModules(
   { config, hot, moduleGraph }: ViteDevServer,
   afterInvalidation?: boolean
 ): void {
+  /**存储需要更新的模块信息 */
   const updates: Update[] = [];
+  /**存储已失效的模块 */
   const invalidatedModules = new Set<ModuleNode>();
+  /**存储已遍历的模块 */
   const traversedModules = new Set<ModuleNode>();
-  // Modules could be empty if a root module is invalidated via import.meta.hot.invalidate()
+  // 如果根模块通过import.meta.hot.invalidate()失效，则模块可能为空。
+  /**表示 此次文件发生变化没有模块受到影响，则需要进行全局页面重载 */
   let needFullReload: HasDeadEnd = modules.length === 0;
 
+  // 遍历每个受影响的模块
   for (const mod of modules) {
+    /**存储模块传播边界，记录哪些模块需要更新 */
     const boundaries: PropagationBoundary[] = [];
+
+    // 这个函数会遍历模块的依赖关系，检查模块及其依赖是否可以被更新
+    // 如果某个模块的依赖链中有任何一个模块无法被热更新（比如没有定义 HMR 处理逻辑），则认为存在“死胡同”（dead end）
+    // 当我们说一个模块是“死胡同”时，指的是该模块的更新不能有效地传递给它的依赖模块。
+    // 也就是说，它的更新不会导致其他模块的更新，因此系统需要采取更激进的措施，如全页面重新加载。
+    /**表示当前模块的更新是否存在死胡同 */
     const hasDeadEnd = propagateUpdate(mod, traversedModules, boundaries);
 
+    // 将当前模块标记为失效，并添加到已失效集合中,这样做的目的是失效的模块需要重新加载或重新编译
+    // 传入 true 表示在失效过程中递归地处理模块依赖,确保所有依赖此模块的模块也被标记为失效
     moduleGraph.invalidateModule(mod, invalidatedModules, timestamp, true);
 
+    // 需要全局重载则跳过,后续的遍历都会跳过,因为一旦确定需要全局重载就没有必要再处理剩余模块,节省性能开销
     if (needFullReload) {
       continue;
     }
 
+    // 存在死胡同则跳过当前模块,设置needFullReload 的值,这代表后续的遍历都会跳过
     if (hasDeadEnd) {
       needFullReload = hasDeadEnd;
       continue;
     }
 
     updates.push(
+      //  对数组中的每个元素进行遍历，创建一个新的对象,添加到 updates 中
       ...boundaries.map(
+        /**
+         * boundary：当前模块边界的信息。
+         * acceptedVia：当前模块是通过哪个模块被接受的，即它的依赖关系
+         * isWithinCircularImport：布尔值，指示当前模块是否在循环依赖中
+         */
         ({ boundary, acceptedVia, isWithinCircularImport }) => ({
+          // 更新类型,如 js和 -update 拼接起来，得到类似 js-update 的字符串,这里有js更新和css更新
           type: `${boundary.type}-update` as const,
+          // 当前时间戳，用于标记更新的时间
           timestamp,
+          // 更新模块的路径,并规范化路径
           path: normalizeHmrUrl(boundary.url),
+          // 接受更新的模块路径,规范化路径
           acceptedPath: normalizeHmrUrl(acceptedVia.url),
+          // 指示是否需要显式导入,对于js文件的更新 需要去进行检查
           explicitImportRequired:
             boundary.type === "js"
               ? isExplicitImportRequired(acceptedVia.url)
               : false,
+          // 表示当前模块是否在循环依赖中
           isWithinCircularImport,
           // browser modules are invalidated by changing ?t= query,
           // but in ssr we control the module system, so we can directly remove them form cache
+          /**
+           * 1. 浏览器环境下的模块失效:
+           * 在浏览器中，缓存的模块可以通过 URL 的变化来失效。添加或更新 ?t= 查询参数，可以让浏览器认为这是一个新的请求，从而重新加载模块
+           * @example
+           * /path/to/module.js?t=123456，这里的 ?t=123456 是时间戳或其他变化的值，用于强制浏览器重新加载模块
+           *
+           * 2. SSR 环境下的模块失效:
+           * 在 SSR 环境中，开发者可以直接控制模块系统，因此可以精确地将失效的模块从缓存中移除
+           * 在 Node.js 中，可以使用 require.cache 来直接操作模块缓存
+           */
+
+          // 获取需要在 SSR 环境中失效的模块
           ssrInvalidates: getSSRInvalidatedImporters(acceptedVia),
         })
       )
     );
   }
 
+  // 遍历处理完受到影响的模块后,根据不同情况决定如何通知客户端进行更新
+
   if (needFullReload) {
+    // 页面需要完全重新加载
+
+    // 记录需要重新加载的原因,如果是字符串,将其作为原因附加到日志中
     const reason =
       typeof needFullReload === "string"
         ? colors.dim(` (${needFullReload})`)
         : "";
+
+    // 记录日志信息,将文件路径和原因附加到日志中
     config.logger.info(
       colors.green(`page reload `) + colors.dim(file) + reason,
       { clear: !afterInvalidation, timestamp: true }
     );
+
+    // 通知客户端需要进行页面的完全重新加载
     hot.send({
       type: "full-reload",
-      triggeredBy: path.resolve(config.root, file),
+      triggeredBy: path.resolve(config.root, file), //表示触发重新加载的文件路径
     });
     return;
   }
 
   if (updates.length === 0) {
+    // 表示没有需要更新的模块,记录没有发生更新的调试信息
     debugHmr?.(colors.yellow(`no update happened `) + colors.dim(file));
     return;
   }
 
+  // 记录 HMR 更新的日志消息
   config.logger.info(
     colors.green(`hmr update `) +
+      // 将所有更新的模块路径（去重后）合并成一个字符串，并附加到日志中
       colors.dim([...new Set(updates.map((u) => u.path))].join(", ")),
     { clear: !afterInvalidation, timestamp: true }
   );
+
+  // 通知客户端需要进行模块的热更新,updates 包含了所有需要更新的模块信息
   hot.send({
     type: "update",
     updates,
@@ -665,20 +729,48 @@ function areAllImportsAccepted(
   return true;
 }
 
+/**
+ * 这个函数的作用是递归地遍历模块的依赖树，以确定哪些模块需要进行更新，
+ * 以及哪些模块的更新会导致无法继续热更新（需要完全重新加载页面）
+ *
+ * @param node 当前正在处理的模块节点
+ * @param traversedModules 已经遍历过的模块集合，用于避免重复遍历
+ * @param boundaries 存储边界模块的信息，边界模块是那些可以接受热更新的模块
+ * @param currentChain 当前递归链中的模块数组，用于检测循环依赖
+ * @returns
+ */
 function propagateUpdate(
   node: ModuleNode,
   traversedModules: Set<ModuleNode>,
   boundaries: PropagationBoundary[],
   currentChain: ModuleNode[] = [node]
 ): HasDeadEnd {
+  // 如果当前模块已经遍历过，直接返回 false，表示没有遇到死胡同
   if (traversedModules.has(node)) {
     return false;
   }
+
+  // 将当前模块添加到已遍历集合中,表示当前模块被处理
   traversedModules.add(node);
 
   // #7561
   // if the imports of `node` have not been analyzed, then `node` has not
   // been loaded in the browser and we should stop propagation.
+  /**
+   * 这段注释解释为什么在某些情况下需要停止传播更新
+   *
+   * 在热更新中，我们需要确定哪些模块需要更新，并且如何正确传播这些更新到依赖这些模块的其他模块
+   * propagateUpdate 函数的作用是根据模块的导入和接受情况传播更新,
+   * 如果模块或其导入者还没有被分析过，传播过程可能无法正常工作。
+   *
+   * 停止传播的条件:
+   * node.id 的存在表明模块的基本信息已经被处理
+   * isSelfAccepting 表示模块是否自我接受更新,如果尚未设置，这意味着该模块在浏览器中尚未被分析
+   *
+   * 停止传播的原因:
+   * 如果模块的导入（即其依赖项）尚未被分析，那么该模块可能尚未加载到浏览器中。因为它的状态在浏览器中尚不可用，无法进行有效的热更新
+   * 在这种情况下，继续传播更新可能会导致不一致的状态或无法正确地应用更新。
+   */
   if (node.id && node.isSelfAccepting === undefined) {
     debugHmr?.(
       `[propagate update] stop propagation because not analyzed: ${colors.dim(
@@ -688,17 +780,55 @@ function propagateUpdate(
     return false;
   }
 
+  /**
+   * 我们再来回顾一下在vite的hmr中，一个模块可以有不同的接受方式
+   * 1. 完全自接受（self-accepting）：如果一个模块被标记为自我接受，它能够处理自己的更新。
+   * 这种情况下，该模块在更新时不需要通知其他模块进行处理。这通常意味着这个模块的更新不会影响其他依赖于它的模块。
+   *
+   * 2. 部分自接受（partially self-accepting）：模块本身无法完全处理自身的更新，
+   * 但它可以处理部分的更新，比如只接受某些导出的部分，它仍然可能需要通知其他模块，以确保整体应用的状态保持一致。
+   *
+   * 3. 完全不接受（not accepting）：模块无法处理自身的更新，需要重新加载整个模块或整个页面
+   */
+  // 处理模块自接受更新
   if (node.isSelfAccepting) {
+    // 将模块添加到 boundaries 中
     boundaries.push({
-      boundary: node,
-      acceptedVia: node,
-      isWithinCircularImport: isNodeWithinCircularImports(node, currentChain),
+      boundary: node, //当前模块
+      /**
+       * acceptedVia 表示一个模块是如何接受更新的。被设置为 node，这意味着 node 模块本身负责处理更新
+       * 这有助于在 HMR 更新时追踪模块更新的来源。
+       */
+      acceptedVia: node, // 模块被自己接受
+      isWithinCircularImport: isNodeWithinCircularImports(node, currentChain), //检查模块是否在循环导入中
     });
 
     // additionally check for CSS importers, since a PostCSS plugin like
     // Tailwind JIT may register any file as a dependency to a CSS file.
+    /**
+     * 这段注释的作用是解释为什么在传播更新的过程中，还需要额外检查 CSS 导入者
+     * 这是为了处理一些特殊情况，例如 PostCSS 插件（如 Tailwind JIT）可能将其他文件注册为 CSS 文件的依赖
+     *
+     * PostCSS 插件（如 Tailwind JIT）的影响：
+     *  1. PostCSS 是一个工具，用于处理 CSS 文件。在构建过程中，PostCSS 插件（如 Tailwind JIT）会对 CSS 文件进行转换和优化。
+     *  2. Tailwind JIT（即时编译器）是一个 PostCSS 插件，它能够动态生成所需的 CSS 样式。
+     *  在开发模式下，Tailwind JIT 可以将任意文件作为 CSS 文件的依赖项，这意味着 CSS 文件可能依赖于其他非 CSS 文件（例如 Js 文件）
+     *
+     * 额外检查的原因：
+     *  1. 动态依赖：PostCSS 插件可能将非 CSS 文件（例如 Js 文件）作为 CSS 文件的依赖项。
+     *  这意味着，在处理 CSS 文件的更新时，相关的非 CSS 文件也可能需要更新
+     *
+     *  2. 传播更新：在 HMR 过程中，当处理 CSS 文件的更新时，需要确保所有相关的模块
+     * （包括那些由 PostCSS 插件动态注册的依赖项）也被正确处理。如果这些依赖项没有被检查和更新，可能会导致页面样式不一致或其他错误。
+     */
+
+    // 遍历模块的所有导入者
     for (const importer of node.importers) {
+      // 检查导入者是否是 CSS 文件，确保当前链中不包含该导入者以避免循环依赖
       if (isCSSRequest(importer.url) && !currentChain.includes(importer)) {
+        // 递归调用 处理 CSS 导入者，更新 boundaries
+        // 这里递归是确保所有与当前模块 node 相关的 CSS 导入者也被正确更新
+        // 确保 importer 不在 currentChain 中。如果 importer 已经在链中，则表示它已经被处理过，不需要重复处理
         propagateUpdate(
           importer,
           traversedModules,
@@ -708,6 +838,7 @@ function propagateUpdate(
       }
     }
 
+    // 返回 false，表示未遇到死胡同
     return false;
   }
 
@@ -716,32 +847,64 @@ function propagateUpdate(
   // are used outside of me".
   // Also, the imported module (this one) must be updated before the importers,
   // so that they do get the fresh imported module when/if they are reloaded.
+  /**
+   * 这段代码的注释解释了在 HMR 处理过程中的一个重要概念：部分接受的模块
+   *
+   * 1. 部分接受的模块：当一个模块接受 HMR 更新时，它可能只接受自己的一部分更改，而不是整个模块。这种情况称为“部分接受”
+   *
+   * 2. 没有导入者的情况：如果一个模块没有任何导入者（即没有其他模块依赖于它），它被认为是“自我接受”的。
+   *    因为没有其他模块会受到这个模块的影响，这个模块的更新不会影响其他模块
+   *
+   * 如果模块的某些部分被其他模块使用，但它们不能完全自我接受（即不能完全处理这些更新），那么这个模块的更新可能会影响到其他模块。
+   * 在这种情况下，模块本身可能需要更新，以确保它能正确处理更新并让其他模块得到最新的状态。
+   *
+   * 3. 更新顺序：
+   * 当处理 HMR 更新时，必须确保被导入的模块（即当前模块）在其导入者之前更新。这是因为导入者依赖于被导入的模块的最新状态。
+   * 如果导入者（即依赖于当前模块的其他模块）在当前模块更新之前进行了更新，可能会导致导入者获取到旧的、不一致的模块状态。
+   */
   if (node.acceptedHmrExports) {
+    // 说明当前模块可以自我处理更新（自我接受），它会被添加到 boundaries 列表中，表明它能接受自身的更新
+
     boundaries.push({
-      boundary: node,
-      acceptedVia: node,
+      boundary: node, // 当前模块
+      acceptedVia: node, // 模块被自己接受
+      // 检查模块是否在循环导入中
       isWithinCircularImport: isNodeWithinCircularImports(node, currentChain),
     });
   } else {
     if (!node.importers.size) {
+      // 模块没有导入者，表示它的更新不会影响其他模块（即它是“死胡同”）
+      // 返回 true 表示需要强制全页面重新加载
       return true;
     }
 
     // #3716, #3913
     // For a non-CSS file, if all of its importers are CSS files (registered via
     // PostCSS plugins) it should be considered a dead end and force full reload.
+    /**
+     * 如果一个非 CSS 文件的所有导入者都是 CSS 文件，这意味着该非 CSS 文件的内容并没有直接影响到 JS 或其他逻辑代码，而只是影响了样式
+     * 在这种情况下，当非 CSS 文件更新时，因为它的所有依赖（importers）都是 CSS 文件，这些 CSS 文件可能是由 PostCSS 等工具生成的，
+     * 它们并不会处理这些非 CSS 文件的更新。因此，这个非 CSS 文件的更新实际上无法有效传递到其他非 CSS 文件上。
+     */
     if (
       !isCSSRequest(node.url) &&
+      // 模块的所有导入者都是 CSS 文件（例如通过 PostCSS 插件），这也被视为“死胡同”，
+      // 因为非 CSS 文件的更新不会对这些 CSS 文件产生有效影响，导致全页面重新加载。
       [...node.importers].every((i) => isCSSRequest(i.url))
     ) {
       return true;
     }
   }
 
+  // 这块循环逻辑负责在模块更新时传播更改并检查是否需要全页面重新加载。
+  // 它主要处理的是在模块更新时如何递归地更新与之相关联的模块，并处理循环依赖和更新边界
   for (const importer of node.importers) {
+    /**当前模块链的扩展版，包含当前模块和它的导入者，这用于追踪更新路径，并防止循环依赖问题 */
     const subChain = currentChain.concat(importer);
 
+    // 检查当前的导入者是否已经接受了从当前模块传播的更新
     if (importer.acceptedHmrDeps.has(node)) {
+      // 将当前导入者作为一个边界（boundary）添加到 boundaries 数组中。这表示当前导入者接受了更新。
       boundaries.push({
         boundary: importer,
         acceptedVia: node,
@@ -751,9 +914,14 @@ function propagateUpdate(
     }
 
     if (node.id && node.acceptedHmrExports && importer.importedBindings) {
+      // 当前模块 node 有有效的 ID 和接受 HMR 导出的模块且导入者有导入绑定
+
+      // 获取当前模块的导入绑定
       const importedBindingsFromNode = importer.importedBindings.get(node.id);
       if (
         importedBindingsFromNode &&
+        // 检查从当前模块导入的所有绑定是否都已被接受
+        // 这个检查确保了在模块更新时，如果所有依赖的绑定都已被接受，就不需要进一步处理该导入者
         areAllImportsAccepted(importedBindingsFromNode, node.acceptedHmrExports)
       ) {
         continue;
@@ -761,12 +929,18 @@ function propagateUpdate(
     }
 
     if (
+      // 确保当前模块链中不包含当前导入者，这是为了防止递归调用导致无限循环
       !currentChain.includes(importer) &&
+      // 递归地调用 propagateUpdate 函数来处理导入者
+      // 传递的 subChain 是当前模块链加上当前导入者，用于跟踪更新路径
       propagateUpdate(importer, traversedModules, boundaries, subChain)
     ) {
+      // 如果递归调用返回 true，则表示存在死胡同（即无法继续传播更新），因此返回 true
       return true;
     }
   }
+
+  // 这段代码的主要作用是确保模块的更新能够正确地传播到所有相关模块，并且在发现无法继续传播的情况下，能够准确地判断是否需要全页面重新加载
   return false;
 }
 
