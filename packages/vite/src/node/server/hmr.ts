@@ -717,12 +717,26 @@ function getSSRInvalidatedImporters(module: ModuleNode) {
   );
 }
 
+/**
+ * 这个函数的作用是确保一个模块的所有导入都能被它的导出接受，从而支持部分模块热更新
+ *
+ * @param importedBindings 模块导入的绑定名集合
+ * @param acceptedExports 模块接受热更新的导出名集合
+ * @returns
+ * @example
+ * 模块 A 导出 foo 和 bar
+ * 模块 B 导入了 A 的 foo 和 baz
+ * acceptedExports 是 {foo, bar}，importedBindings 是 {foo, baz}
+ */
 function areAllImportsAccepted(
   importedBindings: Set<string>,
   acceptedExports: Set<string>
 ) {
+  // 遍历 导入绑定 中的每一个绑定
   for (const binding of importedBindings) {
+    // 检查每个绑定是否在接受的导出中
     if (!acceptedExports.has(binding)) {
+      // 表示并不是所有导入都被接受
       return false;
     }
   }
@@ -945,14 +959,48 @@ function propagateUpdate(
 }
 
 /**
- * Check importers recursively if it's an import loop. An accepted module within
- * an import loop cannot recover its execution order and should be reloaded.
+ * 当一个模块在导入循环中接受热更新（HMR）时，其执行顺序可能无法恢复，因此需要重新加载整个页面
+ * 这是因为循环引用中的模块更新可能会导致无法预期的行为和错误
  *
  * @param node The node that accepts HMR and is a boundary
- * @param nodeChain The chain of nodes/imports that lead to the node.
- *   (The last node in the chain imports the `node` parameter)
- * @param currentChain The current chain tracked from the `node` parameter
- * @param traversedModules The set of modules that have traversed
+ * @param nodeChain 表示整个导入链,这条链记录了触发热更新的初始模块以及沿途所有经过的模块
+ * @param currentChain 从当前模块节点追踪的节点链，默认为 [node],它用于记录当前递归调用过程中经过的所有模块
+ * @param traversedModules 已经遍历过的模块集合，用于防止重复处理
+ *
+ * @example
+ * 假设我们有以下模块导入关系：
+ * A 导入 B
+ * B 导入 C
+ * C 导入 D
+ * D 导入 E
+ * E 导入 A（形成一个循环导入）
+ * 
+ * A -> B -> C -> D -> E -> A
+ * 
+ * 从模块 A 开始执行，看看如何检测到循环导入
+ * 
+ * 第一次递归：fn(A, [A], [A]);
+ * A.importers，A 导入 B，B 不在 nodeChain 中，进行第二次递归
+ *  const result = fn(
+      importer, // B
+      nodeChain, // [A]
+      currentChain.concat(importer), // [A, B]
+      traversedModules
+    );
+
+ * 第二次递归：fn(B, [A], [A,B]);
+    B.importers，B 导入 C，C 不在 nodeChain 中，进行第三次次递归
+    const result = fn(
+      importer, // C
+      nodeChain, // [A]
+      currentChain.concat(importer), // [A, B, C]
+      traversedModules
+    );
+    .....
+    第五次递归：fn(E, [A], [A, B, C, D, E])（处理 E 的导入者 A，检测到循环）
+    E.importers  E 导入 A  A 在 nodeChain 中，索引为 0
+    发现循环导入
+    
  */
 function isNodeWithinCircularImports(
   node: ModuleNode,
@@ -965,35 +1013,47 @@ function isNodeWithinCircularImports(
   // A -> B -> C -> ACCEPTED -> D -> E -> NODE
   //      ^--------------------------|
   //
-  // ACCEPTED: the node that accepts HMR. the `node` parameter.
-  // NODE    : the initial node that triggered this HMR.
+  // ACCEPTED: 接受 HMR 的节点，这里是 node 参数
+  // NODE    : 触发 HMR 的初始节点
   //
-  // This function will return true in the above graph, which:
+  // 这个函数将在上面的导入图中返回 true，其中
   // `node`         : ACCEPTED
   // `nodeChain`    : [NODE, E, D, ACCEPTED]
   // `currentChain` : [ACCEPTED, C, B]
   //
-  // It works by checking if any `node` importers are within `nodeChain`, which
-  // means there's an import loop with a HMR-accepted module in it.
+  // 这个函数的工作原理是通过检查 node 的任何导入者是否在 nodeChain 中，如果是，则意味着存在一个包含 HMR 接受模块的导入循环
 
+  // 如果当前模块已经遍历过，则直接返回 false
   if (traversedModules.has(node)) {
     return false;
   }
+
+  // 将当前模块加入已遍历集合
   traversedModules.add(node);
 
+  // node.importers 是当前模块的导入者集合。这里遍历每个导入者 importer
   for (const importer of node.importers) {
-    // Node may import itself which is safe
+    // 如果导入者是当前模块本身（自引用），则跳过
+    // 自引用是指一个模块导入自己。在检测循环导入时，自引用被认为是安全的，不会导致循环导入问题。
     if (importer === node) continue;
 
     // a PostCSS plugin like Tailwind JIT may register
     // any file as a dependency to a CSS file.
     // But in that case, the actual dependency chain is separate.
+    /**
+     * PostCSS 插件（如 Tailwind JIT）可能会将任何文件注册为 CSS 文件的依赖项
+     * 然而，这种情况下，依赖关系实际上是分离的：
+     * 即这些非 CSS 文件并不直接依赖于 CSS 文件，或这些文件在实际导入链中并不构成直接的循环导入关系
+     * 因此，在检测循环导入时，可以忽略这些通过 CSS 文件注册的依赖项，因为它们不会导致实际的循环导入问题
+     */
+
+    // 如果导入者是一个 CSS 文件，跳过
     if (isCSSRequest(importer.url)) continue;
 
-    // Check circular imports
+    // 在 nodeChain 中查找导入者的索引。如果找到，说明存在循环导入。
     const importerIndex = nodeChain.indexOf(importer);
     if (importerIndex > -1) {
-      // Log extra debug information so users can fix and remove the circular imports
+      // 记录额外的调试信息，以便用户可以修复和删除循环导入
       if (debugHmr) {
         // Following explanation above:
         // `importer`                    : E
@@ -1013,14 +1073,16 @@ function isNodeWithinCircularImports(
       return true;
     }
 
-    // Continue recursively
+    // 如果当前链 currentChain 不包含导入者，递归调用，检查导入者的导入链
     if (!currentChain.includes(importer)) {
       const result = isNodeWithinCircularImports(
         importer,
         nodeChain,
+        // 将导入者添加到当前链，以便在后续递归调用中检测到循环导入
         currentChain.concat(importer),
         traversedModules
       );
+      // 如果递归结果为 true，函数立即返回 true
       if (result) return result;
     }
   }

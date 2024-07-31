@@ -26,7 +26,7 @@ import {
   createServerHMRChannel,
   getShortName,
   handleHMRUpdate,
-  // updateModules,
+  updateModules,
 } from "./hmr";
 import type { HMRBroadcaster, HmrOptions } from "./hmr";
 
@@ -47,7 +47,7 @@ import { CLIENT_DIR, DEFAULT_DEV_PORT } from "../constants";
 import {
   diffDnsOrderChange,
   isInNodeModules,
-  isObject,
+  // isObject,
   isParentDirectory,
   mergeConfig,
   normalizePath,
@@ -57,7 +57,10 @@ import {
 } from "../utils";
 import { ModuleGraph } from "./moduleGraph";
 import type { ModuleNode } from "./moduleGraph";
+import type { PluginContainer } from "./pluginContainer";
 import { ERR_CLOSED_SERVER, createPluginContainer } from "./pluginContainer";
+import type { WebSocketServer } from "./ws";
+
 // import { ssrTransform } from "../ssr/ssrTransform";
 // import { ssrLoadModule } from "../ssr/ssrModuleLoader";
 // import { ssrFetchModule } from "../ssr/ssrFetchModule";
@@ -94,10 +97,12 @@ import {
 } from "./middlewares/indexHtml";
 import { notFoundMiddleware } from "./middlewares/notFound";
 import type { CommonServerOptions } from "../http";
+import type { Logger } from "../logger";
 
 import { searchForWorkspaceRoot } from "./searchRoot";
 
 //文件预热
+import type { TransformOptions, TransformResult } from "./transformRequest";
 import { transformRequest } from "./transformRequest";
 import { warmupFiles } from "./warmup";
 
@@ -165,6 +170,16 @@ export interface ServerOptions extends CommonServerOptions {
   sourcemapIgnoreList?:
     | false
     | ((sourcePath: string, sourcemapPath: string) => boolean);
+}
+
+export interface ResolvedServerOptions
+  extends Omit<ServerOptions, "fs" | "middlewareMode" | "sourcemapIgnoreList"> {
+  fs: Required<FileSystemServeOptions>;
+  middlewareMode: NonNullable<ServerOptions["middlewareMode"]>;
+  sourcemapIgnoreList: Exclude<
+    ServerOptions["sourcemapIgnoreList"],
+    false | undefined
+  >;
 }
 
 export interface FileSystemServeOptions {
@@ -948,13 +963,13 @@ export async function _createServer(
       const file = getShortName(mod.file!, config.root);
 
       // 更新依赖该模块的模块
-      // updateModules(
-      //   file,
-      //   [...mod.importers],
-      //   mod.lastHMRTimestamp,
-      //   server,
-      //   true // 标记为模块的强制更新
-      // );
+      updateModules(
+        file,
+        [...mod.importers],
+        mod.lastHMRTimestamp,
+        server,
+        true // 标记为模块的强制更新
+      );
     }
   });
 

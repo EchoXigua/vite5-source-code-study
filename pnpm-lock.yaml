@@ -32,6 +32,9 @@ importers:
       '@types/node':
         specifier: ^20.14.2
         version: 20.14.10
+      '@types/picomatch':
+        specifier: ^2.3.3
+        version: 2.3.4
       '@types/ws':
         specifier: ^8.5.10
         version: 8.5.10
@@ -1022,6 +1025,10 @@ packages:
     resolution: {integrity: sha512-MdiXf+nDuMvY0gJKxyfZ7/6UFsETO7mGKF54MVD/ekJS6HdFtpZFBgrh6Pseu64XTb2MLyFPlbW6hj8HYRQNOQ==}
     dependencies:
       undici-types: 5.26.5
+    dev: true
+
+  /@types/picomatch@2.3.4:
+    resolution: {integrity: sha512-0so8lU8O5zatZS/2Fi4zrwks+vZv7e0dygrgEZXljODXBig97l4cPQD+9LabXfGJOWwoRkTVz6Q4edZvD12UOA==}
     dev: true
 
   /@types/pnpapi@0.0.5:
