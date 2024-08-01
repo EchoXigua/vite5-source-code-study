@@ -672,21 +672,40 @@ export function handlePrunedModules(
 // vitejs/vite#610 when hot-reloading Vue files, we read immediately on file
 // change event and sometimes this can be too early and get an empty buffer.
 // Poll until the file's modified time has changed before reading again.
+/**
+ * 这个函数通过检测文件修改时间来处理文件可能正在被修改的情况，确保最终读取到的文件内容是完整的。这对于需要读取频繁被修改的文件时特别有用。
+ *
+ * @param file
+ * @returns
+ */
 async function readModifiedFile(file: string): Promise<string> {
+  // 读取文件内容
   const content = await fsp.readFile(file, "utf-8");
+
+  // 检查文件内容是否为空
   if (!content) {
+    // 获取文件的修改时间，并将其存储在 mtime 变量中
     const mtime = (await fsp.stat(file)).mtimeMs;
 
+    // 使用一个循环等待最多 100 毫秒,每次等待后检查文件的修改时间是否发生变化。如果修改时间发生变化，则退出循环
+    /**
+     * 这个循环的目的是处理在文件系统事件触发后立即读取文件时可能出现的问题，特别是当文件正在被修改时，
+     * 可能会读取到不完整或空的内容。通过轮询文件的修改时间，这段代码确保在文件完全修改完成之后再读取文件内容。
+     */
     for (let n = 0; n < 10; n++) {
       await new Promise((r) => setTimeout(r, 10));
+      // 获取文件的最新修改时间
       const newMtime = (await fsp.stat(file)).mtimeMs;
+      // 如果修改时间发生变化，表示文件修改已经完成，退出循环
       if (newMtime !== mtime) {
         break;
       }
     }
 
+    // 再次读取文件的内容，并返回该内容
     return await fsp.readFile(file, "utf-8");
   } else {
+    // 返回读取到的内容
     return content;
   }
 }
