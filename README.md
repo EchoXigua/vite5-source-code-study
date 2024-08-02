@@ -24,6 +24,7 @@
 
 + [小白也能读懂的vite源码系列——vite 开发启动流程（一）](https://juejin.cn/post/7396463744187711497)
 + [小白也能读懂的vite源码系列——vite 中间件处理（二）](https://juejin.cn/post/7396921720722325541)
++ [vite 预构建文档](https://www.yuque.com/maixiguadeaoliao/kd6ou7/)
 
 
 
