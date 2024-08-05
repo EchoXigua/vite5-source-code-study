@@ -395,28 +395,47 @@ export function updateModules(
   });
 }
 
+/**
+ * 这个函数用于创建一个 HMR 广播器对象，这个广播器对象可以管理多个 HMR 通道（channels）
+ * 并在这些通道上发送和接收消息。
+ * @returns
+ */
 export function createHMRBroadcaster(): HMRBroadcaster {
+  /**用于存储所有添加的 HMR 通道 */
   const channels: HMRChannel[] = [];
+  /**用于跟踪已经准备好的 HMR 通道 */
   const readyChannels = new WeakSet<HMRChannel>();
+
+  /**定义一个广播器对象，包含了管理 HMR 通道的各种方法和属性 */
   const broadcaster: HMRBroadcaster = {
+    //  获取通道列表
     get channels() {
       return [...channels];
     },
+    // 用于添加一个新的 HMR 通道
     addChannel(channel) {
+      // 这里不让重复添加，如果已经存在了则会报错提示
       if (channels.some((c) => c.name === channel.name)) {
         throw new Error(`HMR channel "${channel.name}" is already defined.`);
       }
       channels.push(channel);
+      // 返回广播器对象以便链式调用
       return broadcaster;
     },
+    // 用于为所有通道添加事件监听器
     on(event: string, listener: (...args: any[]) => any) {
-      // emit connection event only when all channels are ready
+      // 如果事件类型是 "connection"，则会等到所有通道都准备好之后才触发监听器。
       if (event === "connection") {
         // make a copy so we don't wait for channels that might be added after this is triggered
+        // 1. 防止未来添加的通道影响当前逻辑：
+        // 2. 确保所有通道都已准备好：
+
         const channels = this.channels;
+        // 遍历所有的通道，当每个通道触发 connection 事件时，将该通道添加到 已准备好的通道集合中
         channels.forEach((channel) =>
           channel.on("connection", () => {
             readyChannels.add(channel);
+            // 当所有的通道都被添加到 已准备好的通道集合中，才会触发 事件监听器
             if (channels.every((c) => readyChannels.has(c))) {
               listener();
             }
@@ -424,19 +443,26 @@ export function createHMRBroadcaster(): HMRBroadcaster {
         );
         return;
       }
+
+      // 对于其他事件类型，会为每个通道添加相同的监听器
       channels.forEach((channel) => channel.on(event, listener));
       return;
     },
+    // 用于移除所有通道上的事件监听器
     off(event, listener) {
       channels.forEach((channel) => channel.off(event, listener));
       return;
     },
+    // 用于向所有通道发送消息
     send(...args: any[]) {
       channels.forEach((channel) => channel.send(...(args as [any])));
     },
+    // 用于启动所有通道的监听
     listen() {
       channels.forEach((channel) => channel.listen());
     },
+    // 用于关闭所有通道，并返回一个包含所有关闭操作的 Promise
+    // 这里返回promise 是为了在执行完关闭后，让调用者去执行其他逻辑
     close() {
       return Promise.all(channels.map((channel) => channel.close()));
     },
@@ -451,36 +477,54 @@ export interface ServerHMRChannel extends HMRChannel {
   };
 }
 
+/**
+ * 这个函数用于创建一个服务器端的 HMR 通道，
+ * 该通道使用 EventEmitter 进行事件处理，并提供了发送消息、监听和取消事件监听、关闭通道等功能。
+ * @returns
+ */
 export function createServerHMRChannel(): ServerHMRChannel {
+  // 用于处理内部事件
   const innerEmitter = new EventEmitter();
+  // 用于处理外部事件（如发送消息）
   const outsideEmitter = new EventEmitter();
 
+  // 返回通道对象
   return {
     name: "ssr",
+    // 用于发送消息
     send(...args: any[]) {
       let payload: HMRPayload;
       if (typeof args[0] === "string") {
+        // 如果第一个参数是字符串，则将其视为自定义事件
         payload = {
           type: "custom",
           event: args[0],
           data: args[1],
         };
       } else {
+        // 将第一个参数作为 payload
         payload = args[0];
       }
+      // 触发 send 事件，传递payload
       outsideEmitter.emit("send", payload);
     },
+    // 用于取消事件监听
     off(event, listener: () => void) {
       innerEmitter.off(event, listener);
     },
+    // 用于添加事件监听器
     on: ((event: string, listener: () => unknown) => {
       innerEmitter.on(event, listener);
     }) as ServerHMRChannel["on"],
+    // 用于关闭通道
     close() {
+      // 移除所有的事件监听器
       innerEmitter.removeAllListeners();
       outsideEmitter.removeAllListeners();
     },
+    // 用于启动监听
     listen() {
+      // 触发 connection 事件，表示通道已准备好
       innerEmitter.emit("connection");
     },
     api: {

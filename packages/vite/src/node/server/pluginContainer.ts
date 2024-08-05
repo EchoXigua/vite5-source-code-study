@@ -71,7 +71,7 @@ import type { Plugin } from "../plugin";
 import {
   // combineSourcemaps,
   createDebugger,
-  // ensureWatchedFile,
+  ensureWatchedFile,
   // generateCodeFrame,
   isExternalUrl,
   isObject,
