@@ -41,23 +41,32 @@ const debugCache = createDebugger("vite:cache");
 const knownIgnoreList = new Set(["/", "/favicon.ico"]);
 
 /**
- * A middleware that short-circuits the middleware chain to serve cached transformed modules
+ * 用于处理 Vite 开发服务器中的缓存转换逻辑。它的主要目的是检查请求的 ETag 头，
+ * 如果可以使用缓存响应，就返回 HTTP 状态码 304 (Not Modified)，以避免重新处理请求，从而提升性能。
  */
 export function cachedTransformMiddleware(
   server: ViteDevServer
 ): Connect.NextHandleFunction {
   // Keep the named function. The name is visible in debug logs via `DEBUG=connect:dispatcher ...`
   return function viteCachedTransformMiddleware(req, res, next) {
-    // check if we can return 304 early
+    // 检查是否可以提前返回 304 状态码
+    // 浏览器在请求头中带有 If-None-Match，表示它已经有一个缓存的版本，并带有 ETag 值
+    // 服务器通过这个 ETag 来判断是否内容有变化
     const ifNoneMatch = req.headers["if-none-match"];
     if (ifNoneMatch) {
+      // 获取与 ETag 对应的模块
       const moduleByEtag = server.moduleGraph.getModuleByEtag(ifNoneMatch);
+      // 转换结果中的 ETag 与请求头中的 ETag 相同，说明内容没有变化，可以使用缓存
       if (moduleByEtag?.transformResult?.etag === ifNoneMatch) {
         // For CSS requests, if the same CSS file is imported in a module,
         // the browser sends the request for the direct CSS request with the etag
         // from the imported CSS module. We ignore the etag in this case.
+        /**
+         * 对于 CSS 请求，可能会有多次请求同一个 CSS 文件的情况。需要忽略这种情况下的 ETag。
+         */
         const maybeMixedEtag = isCSSRequest(req.url!);
         if (!maybeMixedEtag) {
+          // 返回 304 状态码，告诉浏览器内容没有变化，可以使用缓存的版本
           debugCache?.(`[304] ${prettifyUrl(req.url!, server.config.root)}`);
           res.statusCode = 304;
           return res.end();
@@ -65,6 +74,7 @@ export function cachedTransformMiddleware(
       }
     }
 
+    // 如果不能使用缓存或者是 CSS 请求，调用 next() 继续处理请求
     next();
   };
 }

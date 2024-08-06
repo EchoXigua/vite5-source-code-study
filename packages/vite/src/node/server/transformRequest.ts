@@ -26,7 +26,7 @@ import {
 } from "../optimizer";
 import { cleanUrl, unwrapId } from "../../shared/utils";
 import {
-  // applySourcemapIgnoreList,
+  applySourcemapIgnoreList,
   extractSourcemapFromFile,
   injectSourcesContent,
 } from "./sourcemap";
@@ -490,12 +490,12 @@ async function loadAndTransform(
     // 构建源码映射文件的路径
     const sourcemapPath = `${mod.file}.map`;
     // 应用源映射忽略列表
-    // applySourcemapIgnoreList(
-    //   normalizedMap,
-    //   sourcemapPath,
-    //   config.server.sourcemapIgnoreList,
-    //   logger
-    // );
+    applySourcemapIgnoreList(
+      normalizedMap,
+      sourcemapPath,
+      config.server.sourcemapIgnoreList,
+      logger
+    );
 
     // 如果模块文件路径是绝对路径
     if (path.isAbsolute(mod.file)) {
